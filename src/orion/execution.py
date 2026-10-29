@@ -1,4 +1,5 @@
 """One-shot execution with a persistent exclusive claim and bounded child process."""
+import hashlib
 import os
 import socket
 import json
@@ -13,6 +14,8 @@ from .models import ValidationError, NotFoundError
 from .service import Service, identifier, timestamp
 from .workers import resolve
 from .approvals import authorize, proposal
+from .inputs import operation
+from .verification import VerificationService
 
 
 def _invoke(sender, handler, snapshot):
@@ -39,6 +42,9 @@ class ExecutionService:
             result = dict(row)
             raw = result.pop("result_json")
             result["result"] = json.loads(raw) if raw else None
+            if result["worker_id"] == "csv-profile":
+                latest = c.execute("SELECT id, status, verified_at FROM verifications WHERE execution_id=? ORDER BY rowid DESC LIMIT 1", (result["id"],)).fetchone()
+                result["latest_verification"] = dict(latest) if latest else None
             return result
 
     def history(self, task_id: str) -> list[dict]:
@@ -66,9 +72,16 @@ class ExecutionService:
                 raise ValidationError("An execution is already running; inspect history before recovery")
             approval_id = authorize(c, self.database, task["id"], worker_id, worker, self.timeout)
             proposed, _ = proposal(c, self.database, task["id"], worker_id, worker, self.timeout)
+            csv_content = None
+            if worker_id == "csv-profile":
+                csv_input, csv_content = operation(c, self.database, task["id"])
+                if csv_input != proposed["csv_input"]:
+                    raise ValidationError("CSV input changed while claiming execution")
             attempt = c.execute("SELECT COALESCE(MAX(attempt),0)+1 FROM executions WHERE task_id=?", (task["id"],)).fetchone()[0]
             now = timestamp()
             c.execute("INSERT INTO executions VALUES (?,?,?,?,?,?,?,?,?,?)", (execution_id, task["id"], worker_id, "running", now, None, attempt, None, None, None))
+            if csv_content is not None:
+                c.execute("INSERT INTO execution_inputs VALUES (?,?,?,?,?,?)", (execution_id, csv_input["input_id"], csv_input["sha256"], json.dumps(csv_input["limits"]), worker.version, None))
             c.execute("INSERT INTO execution_ownership VALUES (?,?,?,?,?,?)", (execution_id, socket.gethostname(), os.getpid(), None, "not_started", now))
             if approval_id:
                 c.execute("UPDATE approvals SET execution_id=? WHERE id=?", (execution_id, approval_id))
@@ -84,6 +97,8 @@ class ExecutionService:
                     record.update(status="in_progress", updated_at=now)
             if len(json.dumps(snapshot).encode("utf-8")) > 8_000_000:
                 raise ValidationError("Report snapshot exceeds 8 MB limit")
+            if csv_content is not None:
+                snapshot = {"snapshot_at": timestamp(), "csv_bytes": csv_content, "csv_input": csv_input, "worker_version": worker.version}
             context = multiprocessing.get_context("spawn")
             receiver, sender = context.Pipe(duplex=False)
             process = context.Process(target=_invoke, args=(sender, worker.handler, snapshot))
@@ -120,15 +135,29 @@ class ExecutionService:
             if artifact_dir.is_symlink() or artifact_dir.resolve() != data_dir / "artifacts":
                 raise ValidationError("Artifact directory must not redirect outside data directory")
             artifact = artifact_dir / f"{execution_id}.json"
-            with artifact.open("x", encoding="utf-8") as handle:
-                json.dump(output, handle, indent=2)
+            temporary = artifact.with_suffix(".json.partial")
+            with temporary.open("x", encoding="utf-8") as handle:
+                json.dump(output, handle, indent=2, allow_nan=False)
+                handle.flush()
+                os.fsync(handle.fileno())
+            # Hard-link publication is atomic and refuses an existing destination.
+            os.link(temporary, artifact)
+            temporary.unlink()
             worker.validator(snapshot, json.loads(artifact.read_text(encoding="utf-8")))
-            result = {"artifact": str(artifact), "task_count": len(snapshot["tasks"]),
+            result = {"artifact": str(artifact), "task_count": len(snapshot.get("tasks", [])),
                       "output_validated": True, "independent_evaluation": False}
+            if csv_content is not None:
+                digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+                with self.database.connect(write=True) as c:
+                    c.execute("UPDATE execution_inputs SET artifact_digest=? WHERE execution_id=?", (digest, execution_id))
+                verified = VerificationService(self.database).verify(execution_id)
+                result.update(artifact_id=execution_id, input_id=csv_input["input_id"], row_count=output.get("row_count"), column_count=output.get("column_count"), artifact_sha256=digest, verification_id=verified["id"], verification_status=verified["status"], independent_evaluation=verified["status"] == "passed")
+                if verified["status"] != "passed":
+                    raise ValidationError("Independent CSV verification failed")
         except (Exception, KeyboardInterrupt):
             error = traceback.format_exc(limit=15)
         status = "failed" if error else "succeeded"
-        summary = "Worker failed; inspect execution error" if error else "Report saved and validated against captured records"
+        summary = "Worker failed; inspect execution error and verification history" if error else "CSV report independently verified" if csv_content is not None else "Report saved and validated against captured records"
         with self.database.connect(write=True) as c:
             owner = c.execute("SELECT phase FROM execution_ownership WHERE execution_id=?", (execution_id,)).fetchone()
             if owner[0] not in ("not_started", "stopped"):

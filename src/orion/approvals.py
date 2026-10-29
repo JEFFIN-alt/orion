@@ -17,6 +17,9 @@ def proposal(c, database, task_id, worker_id, worker, timeout=10):
     data = {"task_id": task["id"], "worker_id": worker_id, "worker": worker.describe(),
             "timeout": float(timeout), "data_directory": str(database.path.resolve().parent),
             "project": project, "tasks": [dict(row) for row in rows]}
+    if worker_id == "csv-profile":
+        from .inputs import operation
+        data["csv_input"], _ = operation(c, database, task["id"])
     encoded = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     if len(encoded) > 8_000_000:
         raise ValidationError("Report snapshot exceeds 8 MB limit")
@@ -62,7 +65,7 @@ class ApprovalService:
             data, fingerprint = proposal(c, self.database, task["id"], worker_id, worker)
             c.execute("INSERT OR IGNORE INTO approval_policy VALUES (?,?)", (task["id"], timestamp()))
             approval_id = str(uuid4())
-            c.execute("INSERT INTO approvals VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (approval_id, task["id"], worker_id, "Generate project status report", fingerprint, json.dumps(data), reason, timestamp(), "pending", None, None, None))
+            c.execute("INSERT INTO approvals VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (approval_id, task["id"], worker_id, worker.responsibility, fingerprint, json.dumps(data), reason, timestamp(), "pending", None, None, None))
             append_event(c, "approval_requested", task["id"], details={"approval_id": approval_id, "fingerprint": fingerprint})
         return self.get(approval_id)
 

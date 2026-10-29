@@ -3,6 +3,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Callable
 from .models import ValidationError
+from .csv_worker import profile, validate_output
 
 
 def project_report(snapshot: dict) -> dict:
@@ -41,3 +42,10 @@ def resolve(worker_id: str, registry=None) -> Worker:
         return (REGISTRY if registry is None else registry)[worker_id]
     except (KeyError, TypeError) as exc:
         raise ValidationError(f"Unknown registered worker: {worker_id}") from exc
+
+
+REGISTRY["csv-profile"] = Worker("csv-profile", "CSV profile", "Profile an explicitly imported CSV", profile, validate_output,
+    expected_input="Registered input ID, digest-bound bytes, explicit limits",
+    expected_output="JSON dataset structure, missing counts and decimal numeric summaries",
+    capabilities=("read supplied bounded CSV bytes", "return JSON"),
+    completion_conditions="Saved artifact passes separate CSV verification")

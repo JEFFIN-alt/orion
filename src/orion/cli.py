@@ -13,6 +13,8 @@ from .execution import ExecutionService
 from .workers import REGISTRY
 from .approvals import ApprovalService
 from .recovery import RecoveryService
+from .inputs import InputService, DEFAULT_LIMITS
+from .verification import VerificationService
 
 
 def parser() -> argparse.ArgumentParser:
@@ -48,6 +50,19 @@ def parser() -> argparse.ArgumentParser:
     confirm = recovery.add_parser("confirm")
     confirm.add_argument("id")
     confirm.add_argument("--reason", required=True)
+    inputs = commands.add_parser("inputs").add_subparsers(dest="action", required=True)
+    importer = inputs.add_parser("import")
+    importer.add_argument("source")
+    importer.add_argument("--max-bytes", type=int, default=DEFAULT_LIMITS["max_bytes"])
+    inputs.add_parser("list")
+    inputs.add_parser("get").add_argument("id")
+    binding = commands.add_parser("csv-config")
+    binding.add_argument("id")
+    binding.add_argument("--input", required=True, dest="input_id")
+    for key, value in DEFAULT_LIMITS.items():
+        binding.add_argument("--" + key.replace("_", "-"), type=int, default=value)
+    commands.add_parser("verifications").add_argument("id")
+    commands.add_parser("verify").add_argument("id")
     for kind in ("projects", "tasks"):
         group = commands.add_parser(kind).add_subparsers(dest="action", required=True)
         create = group.add_parser("create")
@@ -91,9 +106,22 @@ def main(argv: list[str] | None = None) -> int:
             if not config.database.is_file():
                 raise ValidationError("Database does not exist; run init first")
             health = db.health()
-            if health["schema_version"] != 3 or health["integrity"] != "ok" or health["foreign_key_errors"]:
+            if health["schema_version"] != 4 or health["integrity"] != "ok" or health["foreign_key_errors"]:
                 raise ValidationError(f"Database is not healthy: {health}")
-            if command == "approvals":
+            if command == "inputs":
+                inputs = InputService(db)
+                if args["action"] == "import":
+                    result = inputs.import_csv(args["source"], args["max_bytes"])
+                elif args["action"] == "get":
+                    result = inputs.get(args["id"])
+                else:
+                    result = inputs.list()
+            elif command == "csv-config":
+                result = InputService(db).bind(args.pop("id"), args.pop("input_id"), **args)
+            elif command in ("verify", "verifications"):
+                verifier = VerificationService(db)
+                result = verifier.verify(args["id"]) if command == "verify" else verifier.history(args["id"])
+            elif command == "approvals":
                 approvals = ApprovalService(db)
                 action = args["action"]
                 if action == "pending":
@@ -144,7 +172,7 @@ def main(argv: list[str] | None = None) -> int:
                     result = service.transition(command, record_id, **args)
         logger.info("Command succeeded: %s", command)
         print(json.dumps(result, indent=2))
-        return 1 if command == "execute" and result["status"] == "failed" else 0
+        return 1 if command in ("execute", "verify") and result["status"] == "failed" else 0
     except (ValidationError, sqlite3.Error, OSError, RuntimeError) as exc:
         if logger:
             logger.error("Command failed: %s", exc)

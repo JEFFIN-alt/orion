@@ -1,6 +1,6 @@
 # Orion core foundation
 
-Python 3.12, SQLite and the standard library. A deterministic report worker is included. No AI model, API or dashboard is included. This milestone manages durable records; completed means a manually recorded execution state, not proof that tests passed, requirements were verified, or a deliverable was approved. Persistent human approval is available; independent evaluation remains future work.
+Python 3.12, SQLite and the standard library. A deterministic report worker is included. No AI model, API or dashboard is included. This milestone manages durable records; completed means a manually recorded execution state, not proof that tests passed, requirements were verified, or a deliverable was approved. Persistent human approval is available. CSV reports require separate deterministic result verification; general independent evaluation remains future work.
 
 ## Setup and use (PowerShell)
 
@@ -26,9 +26,9 @@ Replace UUID placeholders with returned identifiers. `setup_dev.py` registers sr
 
 Global options `--database PATH --log-dir PATH` precede the command. Alternatively set ORION_DATABASE, ORION_LOG_DIR, ORION_HOME. Relative locations resolve against ORION_HOME, defaulting to this checkout root, not the caller's current directory. Defaults are data/orion.sqlite3 and logs/orion.log. Explicit locations are trusted operator configuration, not a security sandbox. Logs rotate at 1 MB with two backups. Runtime data, logs, secrets and the venv are ignored by Git.
 
-Run init explicitly. Schema version 3 uses PRAGMA user_version. Repeated initialization preserves data; unsupported versions fail. Every connection enables foreign keys. Writes use BEGIN IMMEDIATE transactions with a five-second lock timeout, rollback on failure, and explicit connection closure. State checking and transitions occur under the same write transaction. SQL identifiers come only from internal allowlists; input values are parameterized. Timestamps are UTC. No delete operation is exposed.
+Run init explicitly. Schema version 4 uses PRAGMA user_version. Repeated initialization preserves data; unsupported versions fail. Every connection enables foreign keys. Writes use BEGIN IMMEDIATE transactions with a five-second lock timeout, rollback on failure, and explicit connection closure. State checking and transitions occur under the same write transaction. SQL identifiers come only from internal allowlists; input values are parameterized. Timestamps are UTC. No delete operation is exposed.
 
-Use status for SQLite integrity and foreign-key diagnostics. For a simple backup, stop all Orion commands, then copy the database file to a separate backup location. Restore only while Orion is stopped and validate the copy with status. Initialization migrates versions 1 and 2 to 3 transactionally. Automated backups are not implemented. Interrupted transactions roll back; previously persisted in_progress tasks remain visible for an explicit decision. There is no automatic task replay.
+Use status for SQLite integrity and foreign-key diagnostics. For a simple backup, stop all Orion commands, then copy the database file to a separate backup location. Restore only while Orion is stopped and validate the copy with status. Initialization migrates versions 1, 2 and 3 to 4 transactionally. Automated backups are not implemented. Interrupted transactions roll back; previously persisted in_progress tasks remain visible for an explicit decision. There is no automatic task replay.
 
 ## State rules
 
@@ -49,7 +49,7 @@ The small service module owns validation and transactional SQL together to avoid
 
 ## Milestone 3: deterministic execution
 
-Run `init` to migrate the existing database to schema 3. The migration adds executions and append-only events, preserving projects and tasks. Older schema versions must be explicitly migrated before other CLI operations.
+Run `init` to migrate the existing database to schema 4. The migration adds executions and append-only events, preserving projects and tasks. Older schema versions must be explicitly migrated before other CLI operations.
 
 ```powershell
 .\.venv\Scripts\python.exe -m orion workers
@@ -63,7 +63,7 @@ Only pending tasks execute. One running execution per database is enforced both 
 
 The registry describes trusted worker handlers, inputs, outputs, capabilities and completion conditions. Task input cannot specify Python code, imports, shell commands, URLs or output paths. The project-status worker receives only a consistent snapshot and returns JSON. It has no supplied database, network, shell or filesystem tools. These are code-level capabilities, not OS-enforced sandbox permissions: trusted Python code runs with the user's process privileges. The venv is not a sandbox.
 
-The engine runs the handler in a spawned child process with a 10-second timeout, terminates it on timeout, validates the result against the captured source records, and writes an exclusively created UUID-named artifact under the database's parent directory/artifacts. ORION_DATABASE or --database therefore also selects the application data directory. Redirected artifact directories are rejected. Reports are limited to 10000 tasks and an 8 MB serialized input snapshot. Output validation and filesystem operations occur in the parent and do not have a separate hard wall-clock timeout. These limits support the sole trusted deterministic worker; do not register untrusted handlers.
+The engine runs the handler in a spawned child process with a 10-second timeout, terminates it on timeout, validates the result against the captured source records, and writes an exclusively created UUID-named artifact under the database's parent directory/artifacts. ORION_DATABASE or --database therefore also selects the application data directory. Redirected artifact directories are rejected. Reports are limited to 10000 tasks and an 8 MB serialized input snapshot. Output validation and filesystem operations occur in the parent and do not have a separate hard wall-clock timeout. These limits support the project-status worker; do not register untrusted handlers.
 
 A report describes its snapshot time. Its own task appears in_progress because completion happens only after artifact validation and persistence. It includes actual record text, which should be treated as local project data. Do not put secrets in task descriptions. The report is structurally/content validated by the engine, not independently evaluated.
 
@@ -100,8 +100,63 @@ Ordinary worker exceptions/timeouts still produce failed attempts. If child term
 
 ### Remaining limits and operational procedure
 
-Back up the stopped application's database and retain artifacts before administrative repair. Inspect a candidate, verify that the recorded processes are no longer active, and use confirm only with an accurate reason; the command still performs its own checks. Inspect history/events afterward. For unresolved cases, investigate OS process information rather than editing away the running flag. No automatic retries, cancellation, approvals authentication/multiple-user roles, remote process tracking, or OS security sandbox is implemented. A local user with direct database/code write access can bypass application policy. Only the trusted deterministic report worker is supported; worker capabilities do not permit spawning descendants, and recovery does not track arbitrary process trees.
+Back up the stopped application's database and retain artifacts before administrative repair. Inspect a candidate, verify that the recorded processes are no longer active, and use confirm only with an accurate reason; the command still performs its own checks. Inspect history/events afterward. For unresolved cases, investigate OS process information rather than editing away the running flag. No automatic retries, cancellation, approvals authentication/multiple-user roles, remote process tracking, or OS security sandbox is implemented. A local user with direct database/code write access can bypass application policy. Only registered trusted deterministic workers are supported; worker capabilities do not permit spawning descendants, and recovery does not track arbitrary process trees.
 
 The handler has a timeout; parent-side validation/filesystem operations are not separately hard-timed. The database and artifact file are not one atomic transaction: an orphan or partial file is retained for review and never promoted to success by recovery. Automated power-loss/corruption recovery is not claimed.
 
-Tests use temporary databases, retain all original behavior checks, and add approval binding/single use, durable decisions and denial events, schema-2 migration, active and unknown process refusal, concurrent recovery, preserved artifacts, and a real controlled parent crash with an independently surviving child. These are deterministic software workflows, not AI reasoning or independent evaluation.
+Tests use temporary databases, retain all original behavior checks, and add approval binding/single use, durable decisions and denial events, schema-2 migration, active and unknown process refusal, concurrent recovery, preserved artifacts, and a real controlled parent crash with an independently surviving child. These are deterministic software workflows, not AI reasoning. CSV-specific independent verification is described below.
+
+
+## Milestone 5: controlled CSV analysis and verification
+
+Schema 4 adds inputs, csv_operations, execution_inputs and immutable verifications. It preserves all project, task, execution, event, approval and recovery tables. Run init explicitly after backing up an existing database.
+
+The import command is the only new operation that accepts a source path. It copies a bounded regular file into data/inputs/UUID.csv, records its basename (not absolute source path), byte size, SHA-256 digest and import time, and never overwrites a registered asset. Input paths, linked source paths, redirected managed directories and malformed identifiers are rejected. Managed input metadata is immutable through the API; changed bytes must be imported as a new asset. Import preserves bytes; UTF-8 and CSV structural validation happen during execution. An interrupted copy/database failure can leave an unregistered file, which the worker cannot resolve by ID.
+
+The data directory is the configured database's parent. inputs/ and artifacts/ are separate managed subdirectories. Set --database or ORION_DATABASE to relocate both consistently. No worker accepts an output path or a source filesystem path. The engine supplies digest-checked bounded bytes to the child. These application controls are not an OS sandbox and do not defend against malicious local code racing filesystem operations or rewriting the database.
+
+### Commands
+
+```powershell
+$python = '.\.venv\Scripts\python.exe'
+$asset = & $python -m orion inputs import '.\sample.csv' | ConvertFrom-Json
+& $python -m orion inputs list
+& $python -m orion inputs get $asset.id
+$project = & $python -m orion projects create 'CSV analysis' | ConvertFrom-Json
+$task = & $python -m orion tasks create 'Profile CSV' --project $project.id --require-approval | ConvertFrom-Json
+& $python -m orion csv-config $task.id --input $asset.id
+$request = & $python -m orion approvals request $task.id csv-profile --reason 'Review imported input and limits' | ConvertFrom-Json
+& $python -m orion approvals get $request.id
+& $python -m orion approvals decide $request.id approved --reason 'Reviewed exact operation'
+$run = & $python -m orion execute $task.id csv-profile | ConvertFrom-Json
+& $python -m orion history $task.id
+& $python -m orion verifications $run.id
+Get-Content -LiteralPath $run.result.artifact
+& $python -m orion verify $run.id
+```
+
+csv-config stores input ID and limits against a pending task; it cannot alter a running task. Bind before requesting approval. Rebinding, changing a limit, changing source records, worker version, task or input invalidates the approval. The fingerprint includes the imported byte digest, and the engine rereads/checks those bytes before claiming execution. The worker runs against that captured byte snapshot. Verification rereads the managed input after execution; changing it during the run causes verification to fail. Authorization remains single-use, and failed attempts do not automatically retry.
+
+### CSV policy and resource limits
+
+Defaults (also hard ceilings in this milestone): 10 MiB input bytes, 100000 data rows, 200 columns, 65536 characters per field including headers. Lower limits are configurable with csv-config --max-bytes, --max-rows, --max-columns and --max-field-size; imports also accept --max-bytes. Invalid/oversized values are rejected. Reads are capped at limit+1 bytes, field limits apply during CSV parsing, and row/column checks never silently truncate. Saved artifacts have a separate 4 MiB verification ceiling. The existing child timeout is 10 seconds; parent-side verification is bounded by input limits but has no independent hard timeout.
+
+Inputs must be UTF-8, optionally with BOM. The dialect is comma-separated Excel-style CSV: double-quote quoting, doubled internal quotes, strict csv.reader parsing, no dialect sniffing or expression evaluation. Headers are trimmed, must be nonempty, and must be unique under case-sensitive comparison after trimming. Header-only datasets are valid with zero rows and empty columns. A missing header, malformed quoting, invalid encoding, empty header, duplicate header, inconsistent row width or exceeded limit fails execution. Blank data lines are not discarded; they fail width validation. Errors report a check/row number, not raw row contents.
+
+Only blank or whitespace-only cells are missing. NA and null are text. Type inference examines every non-missing cell. A column is numeric only when all its non-missing cells match ordinary signed ASCII decimal/scientific notation and are finite Decimal values, with nonzero adjusted decimal exponents between -308 and 308. NaN, infinity, mixed text, underscores and values outside this range make the entire column text. All-missing columns are empty, not numeric.
+
+Numeric output contains observation count, minimum, maximum and mean. Summation and division use a 50-significant-digit Decimal context. Numeric values are JSON strings to preserve explicit decimal representation and avoid binary-float overflow; counts remain JSON integers. This is rounded decimal arithmetic, not arbitrary-precision exact statistics. Reports are deterministic for the same bytes, version, limits and supplied analysis timestamp; real runs have distinct timestamps and execution IDs. No raw data rows or absolute filesystem paths appear in the report.
+
+### Independent verification and failure evidence
+
+The engine exclusively creates a temporary report, flushes it, then publishes the execution-named JSON using a hard link that fails if the destination exists. This provides atomic visibility without overwriting; it requires hard-link support (tested on this Windows filesystem). The temporary file is removed after publication. Unsupported filesystems fail explicitly. SQLite and the filesystem do not share an atomic transaction; partial/orphan files remain evidence and are not promoted by recovery.
+
+verification.py never invokes csv_worker.profile or its output validator. It rereads the original managed input, reads bounded saved artifact bytes, checks recorded digests, parses JSON with duplicate/nonfinite-value rejection, validates schema/metadata, independently parses CSV, and recomputes dimensions, missing/non-missing counts, types and numeric summaries. It checks input/artifact digests again before recording its result. Both paths use Python's CSV/Decimal standard libraries, so this is independent implementation of checks, not independent third-party certification.
+
+Verification rows record verifier/version, execution, observed digests, timestamp, individual checks and passed/failed outcome. Checks stop at the first failed prerequisite, retaining the checks actually performed. A missing or modified artifact produces a failed record. Invalid CSV that fails before producing an artifact has a failed execution and no verification row. Preflight missing/tampered assets are rejected before an execution is created.
+
+CSV execution is marked succeeded only after a passed verification is persisted. Verification failure marks that attempt and task failed and preserves the artifact and verification record. If final persistence is interrupted, existing conservative recovery rules apply. The project-status worker remains content-validated without being relabeled independently verified.
+
+verify EXECUTION_ID explicitly rechecks current files and appends a new immutable result (exit 1 on failed verification); verifications lists the history. execution/history include latest_verification for CSV runs. A later tamper check does not rewrite the historical successful attempt or initial verification: use latest_verification to assess current saved bytes. Verification proves the recorded digests at the time checked, not perpetual immutability. All verification/asset/analysis events avoid copying row contents into logs.
+
+No charts, PDF export, data cleaning, missing-token inference, arbitrary encodings/dialects, generated code, AI models or web dashboard are included. The next useful extension is a readable report view and additional numerical/property tests before expanding analysis scope.

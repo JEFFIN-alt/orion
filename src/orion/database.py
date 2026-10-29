@@ -55,6 +55,21 @@ MIGRATION_3 = (
 )
 
 
+MIGRATION_4 = (
+    """CREATE TABLE inputs (id TEXT PRIMARY KEY, filename TEXT NOT NULL UNIQUE, original_name TEXT NOT NULL,
+      sha256 TEXT NOT NULL, size INTEGER NOT NULL CHECK(size>=0), imported_at TEXT NOT NULL)""",
+    """CREATE TABLE csv_operations (task_id TEXT PRIMARY KEY REFERENCES tasks(id),
+      input_id TEXT NOT NULL REFERENCES inputs(id), limits_json TEXT NOT NULL, updated_at TEXT NOT NULL)""",
+    """CREATE TABLE execution_inputs (execution_id TEXT PRIMARY KEY REFERENCES executions(id),
+      input_id TEXT NOT NULL REFERENCES inputs(id), sha256 TEXT NOT NULL, limits_json TEXT NOT NULL, worker_version TEXT NOT NULL, artifact_digest TEXT)""",
+    """CREATE TABLE verifications (id TEXT PRIMARY KEY, execution_id TEXT NOT NULL REFERENCES executions(id),
+      verifier TEXT NOT NULL, version TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('passed','failed')),
+      input_digest TEXT, artifact_digest TEXT, verified_at TEXT NOT NULL, checks_json TEXT NOT NULL, summary TEXT NOT NULL)""",
+    "CREATE TRIGGER verifications_no_update BEFORE UPDATE ON verifications BEGIN SELECT RAISE(ABORT, 'verification history is immutable'); END",
+    "CREATE TRIGGER verifications_no_delete BEFORE DELETE ON verifications BEGIN SELECT RAISE(ABORT, 'verification history is immutable'); END",
+)
+
+
 class Database:
     def __init__(self, path: Path):
         self.path = Path(path)
@@ -80,7 +95,7 @@ class Database:
     def initialize(self) -> None:
         with self.connect(write=True) as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2, 3):
+            if version not in (0, 1, 2, 3, 4):
                 raise RuntimeError(f"Unsupported database schema version: {version}")
             if version == 0:
                 for statement in SCHEMA:
@@ -94,6 +109,10 @@ class Database:
                 for statement in MIGRATION_3:
                     connection.execute(statement)
                 connection.execute("PRAGMA user_version = 3")
+            if version < 4:
+                for statement in MIGRATION_4:
+                    connection.execute(statement)
+                connection.execute("PRAGMA user_version = 4")
 
     def health(self) -> dict:
         with self.connect() as connection:
