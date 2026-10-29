@@ -1,0 +1,152 @@
+import argparse
+import json
+import sqlite3
+import sys
+
+from . import __version__
+from .config import Config
+from .database import Database
+from .logging_config import configure
+from .models import ValidationError
+from .service import Service
+from .execution import ExecutionService
+from .workers import REGISTRY
+from .approvals import ApprovalService
+from .recovery import RecoveryService
+
+
+def parser() -> argparse.ArgumentParser:
+    root = argparse.ArgumentParser(description="Orion local project and task management")
+    root.add_argument("--version", action="version", version=__version__)
+    root.add_argument("--database")
+    root.add_argument("--log-dir")
+    commands = root.add_subparsers(dest="command", required=True)
+    commands.add_parser("init")
+    commands.add_parser("status")
+    commands.add_parser("workers")
+    run = commands.add_parser("execute")
+    run.add_argument("id")
+    run.add_argument("worker")
+    commands.add_parser("execution").add_argument("id")
+    commands.add_parser("history").add_argument("id")
+    commands.add_parser("events").add_argument("--limit", type=int, default=50)
+    approvals = commands.add_parser("approvals").add_subparsers(dest="action", required=True)
+    approvals.add_parser("pending")
+    approvals.add_parser("require").add_argument("id")
+    approvals.add_parser("get").add_argument("id")
+    request = approvals.add_parser("request")
+    request.add_argument("id")
+    request.add_argument("worker")
+    request.add_argument("--reason", required=True)
+    decision = approvals.add_parser("decide")
+    decision.add_argument("id")
+    decision.add_argument("decision", choices=("approved", "rejected"))
+    decision.add_argument("--reason", required=True)
+    recovery = commands.add_parser("recovery").add_subparsers(dest="action", required=True)
+    recovery.add_parser("running")
+    recovery.add_parser("inspect").add_argument("id")
+    confirm = recovery.add_parser("confirm")
+    confirm.add_argument("id")
+    confirm.add_argument("--reason", required=True)
+    for kind in ("projects", "tasks"):
+        group = commands.add_parser(kind).add_subparsers(dest="action", required=True)
+        create = group.add_parser("create")
+        create.add_argument("name" if kind == "projects" else "title")
+        create.add_argument("--description", default="")
+        if kind == "tasks":
+            create.add_argument("--project", required=True, dest="project_id")
+            create.add_argument("--priority", type=int, default=0)
+            create.add_argument("--require-approval", action="store_true")
+        listing = group.add_parser("list")
+        if kind == "tasks":
+            listing.add_argument("--project", dest="project_id")
+        group.add_parser("get").add_argument("id")
+        update = group.add_parser("update")
+        update.add_argument("id")
+        update.add_argument("--name" if kind == "projects" else "--title")
+        update.add_argument("--description")
+        if kind == "tasks":
+            update.add_argument("--priority", type=int)
+            update.add_argument("--summary")
+        transition = group.add_parser("transition")
+        transition.add_argument("id")
+        transition.add_argument("status")
+        if kind == "tasks":
+            transition.add_argument("--summary")
+    return root
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = vars(parser().parse_args(argv))
+    logger = None
+    try:
+        config = Config.load(args.pop("database"), args.pop("log_dir"))
+        logger = configure(config.log_dir)
+        db = Database(config.database)
+        command = args.pop("command")
+        if command == "init":
+            db.initialize()
+            result = {"database": str(config.database), "initialized": True}
+        else:
+            if not config.database.is_file():
+                raise ValidationError("Database does not exist; run init first")
+            health = db.health()
+            if health["schema_version"] != 3 or health["integrity"] != "ok" or health["foreign_key_errors"]:
+                raise ValidationError(f"Database is not healthy: {health}")
+            if command == "approvals":
+                approvals = ApprovalService(db)
+                action = args["action"]
+                if action == "pending":
+                    result = approvals.pending()
+                elif action == "require":
+                    result = approvals.require(args["id"])
+                elif action == "get":
+                    result = approvals.get(args["id"])
+                elif action == "request":
+                    result = approvals.request(args["id"], args["worker"], args["reason"])
+                else:
+                    result = approvals.decide(args["id"], args["decision"], args["reason"])
+            elif command == "recovery":
+                recovery = RecoveryService(db)
+                if args["action"] == "running":
+                    result = recovery.running()
+                elif args["action"] == "inspect":
+                    result = recovery.inspect(args["id"])
+                else:
+                    result = recovery.confirm(args["id"], args["reason"])
+            elif command == "workers":
+                result = [worker.describe() for worker in REGISTRY.values()]
+            elif command in ("execute", "execution", "history", "events"):
+                engine = ExecutionService(db)
+                if command == "execute":
+                    result = engine.execute(args["id"], args["worker"])
+                elif command == "execution":
+                    result = engine.get(args["id"])
+                elif command == "history":
+                    result = engine.history(args["id"])
+                else:
+                    result = engine.events(args["limit"])
+            elif command == "status":
+                result = {"version": __version__, "database": str(config.database), **health}
+            else:
+                service = Service(db)
+                action = args.pop("action")
+                record_id = args.pop("id", None)
+                if action == "create":
+                    result = (service.create_project if command == "projects" else service.create_task)(**args)
+                elif action == "list":
+                    result = service.list(command, **args)
+                elif action == "get":
+                    result = service.get(command, record_id)
+                elif action == "update":
+                    result = service.update(command, record_id, **{k: v for k, v in args.items() if v is not None})
+                else:
+                    result = service.transition(command, record_id, **args)
+        logger.info("Command succeeded: %s", command)
+        print(json.dumps(result, indent=2))
+        return 1 if command == "execute" and result["status"] == "failed" else 0
+    except (ValidationError, sqlite3.Error, OSError, RuntimeError) as exc:
+        if logger:
+            logger.error("Command failed: %s", exc)
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
