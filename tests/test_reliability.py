@@ -180,7 +180,7 @@ class ReliabilityTests(unittest.TestCase):
         old.initialize()
         self.assertEqual(ExecutionService(old).get(eid)["summary"], "kept")
         self.assertEqual(ExecutionService(old).events()[0]["id"], event)
-        self.assertEqual(old.health()["schema_version"], 6)
+        self.assertEqual(old.health()["schema_version"], 7)
 
     def test_actual_parent_crash_with_live_child(self):
         import time

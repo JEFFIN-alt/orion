@@ -50,3 +50,12 @@ REGISTRY["csv-profile"] = Worker("csv-profile", "CSV profile", "Profile an expli
     expected_output="JSON dataset structure, missing counts and decimal numeric summaries",
     capabilities=("read supplied bounded CSV bytes", "return JSON"),
     completion_conditions="Saved artifact passes separate CSV verification", required_verifier="csv-independent")
+
+
+from .research_sources import collect, validate_packet
+REGISTRY['research-collect'] = Worker('research-collect', 'Public technical evidence collection',
+    'Collect bounded Crossref and GitHub evidence without synthesis', collect, validate_packet,
+    required_verifier='research-independent', expected_input='Approved bounded question and source configuration',
+    expected_output='JSON evidence packet with captured public API responses and provenance',
+    capabilities=('HTTPS GET to fixed Crossref/GitHub API endpoints', 'read supplied configuration', 'return JSON'),
+    completion_conditions='At least one provider search succeeds; saved packet passes independent provenance checks')

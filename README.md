@@ -26,9 +26,9 @@ Replace UUID placeholders with returned identifiers. `setup_dev.py` registers sr
 
 Global options `--database PATH --log-dir PATH` precede the command. Alternatively set ORION_DATABASE, ORION_LOG_DIR, ORION_HOME. Relative locations resolve against ORION_HOME, defaulting to this checkout root, not the caller's current directory. Defaults are data/orion.sqlite3 and logs/orion.log. Explicit locations are trusted operator configuration, not a security sandbox. Logs rotate at 1 MB with two backups. Runtime data, logs, secrets and the venv are ignored by Git.
 
-Run init explicitly. Schema version 6 uses PRAGMA user_version. Repeated initialization preserves data; unsupported versions fail. Every connection enables foreign keys. Writes use BEGIN IMMEDIATE transactions with a five-second lock timeout, rollback on failure, and explicit connection closure. State checking and transitions occur under the same write transaction. SQL identifiers come only from internal allowlists; input values are parameterized. Timestamps are UTC. No delete operation is exposed.
+Run init explicitly. Schema version 7 uses PRAGMA user_version. Repeated initialization preserves data; unsupported versions fail. Every connection enables foreign keys. Writes use BEGIN IMMEDIATE transactions with a five-second lock timeout, rollback on failure, and explicit connection closure. State checking and transitions occur under the same write transaction. SQL identifiers come only from internal allowlists; input values are parameterized. Timestamps are UTC. No delete operation is exposed.
 
-Use status for SQLite integrity and foreign-key diagnostics. For a simple backup, stop all Orion commands, then copy the database file to a separate backup location. Restore only while Orion is stopped and validate the copy with status. Initialization migrates versions 1 through 5 to 6 transactionally. Automated backups are not implemented. Interrupted transactions roll back; previously persisted in_progress tasks remain visible for an explicit decision. There is no automatic task replay.
+Use status for SQLite integrity and foreign-key diagnostics. For a simple backup, stop all Orion commands, then copy the database file to a separate backup location. Restore only while Orion is stopped and validate the copy with status. Initialization migrates versions 1 through 6 to 7 transactionally. Automated backups are not implemented. Interrupted transactions roll back; previously persisted in_progress tasks remain visible for an explicit decision. There is no automatic task replay.
 
 ## State rules
 
@@ -49,7 +49,7 @@ The small service module owns validation and transactional SQL together to avoid
 
 ## Milestone 3: deterministic execution
 
-Run `init` to migrate the existing database to schema 6. The migration adds executions and append-only events, preserving projects and tasks. Older schema versions must be explicitly migrated before other CLI operations.
+Run `init` to migrate the existing database to schema 7. The migration adds executions and append-only events, preserving projects and tasks. Older schema versions must be explicitly migrated before other CLI operations.
 
 ```powershell
 .\.venv\Scripts\python.exe -m orion workers
@@ -163,7 +163,7 @@ No charts, PDF export, data cleaning, missing-token inference, arbitrary encodin
 
 ## Milestone 6: local CEO chat
 
-Run `python -m orion init` to migrate to schema 6, then `python -m orion chat`. Open http://127.0.0.1:8765 (use this exact host). Use the existing .venv interpreter. This is a local development HTTP application, not a public production service. No new Python dependencies are required. Stop with Ctrl+C. The UI includes conversations, selected project context, provider availability, model-labelled responses, structured plans and explicit decisions. Choose Propose plan for natural-language planning; ordinary Send message is discussion only.
+Run `python -m orion init` to migrate to schema 7, then `python -m orion chat`. Open http://127.0.0.1:8765 (use this exact host). Use the existing .venv interpreter. This is a local development HTTP application, not a public production service. No new Python dependencies are required. Stop with Ctrl+C. The UI includes conversations, selected project context, provider availability, model-labelled responses, structured plans and explicit decisions. Choose Propose plan for natural-language planning; ordinary Send message is discussion only.
 
 Schema 5 adds conversations, messages, immutable-content plans, append-only chat_events and a single inference claim. Existing tables are preserved. The UI calls application services; it contains no SQL. The service contract is Provider; OllamaProvider uses local HTTP /api/tags and /api/chat with no tools, proxies or redirects. Configuration: ORION_AI_PROVIDER=ollama, ORION_AI_ENDPOINT=http://127.0.0.1:11434, ORION_AI_MODEL=qwen3.5:2b-q4_K_M, ORION_AI_TIMEOUT=90, ORION_AI_CONTEXT=4096, ORION_AI_MAX_OUTPUT=1024. Endpoint validation permits only loopback. Model downloads are never automatic. `python -m orion ai-status` reports readiness.
 
@@ -228,3 +228,49 @@ Plan approval resolves validated plan keys to created task IDs and registers all
 Core execution checks prerequisites inside the existing BEGIN IMMEDIATE claim transaction, before consuming approval or creating an execution. Other database writers cannot change prerequisite evidence between that check and claim. Rejections append an audit event and create no execution. The single-worker safeguard remains. A second check under the final write transaction prevents recording success if prerequisite evidence became invalid while the worker ran.
 
 The worker runs outside the database transaction. Evidence can change after claim; Orion does not preempt the worker or undo its output. A final invalidation marks the attempt failed and retains artifacts for review. Later invalidations change derived queue status, not historical records. Queue evaluation trusts persisted evidence and does not continuously rehash artifact files; use explicit verification to detect changed bytes. Recovery remains conservative and manual; no automatic retry, scheduling loop, parallel workers, dependency deletion or general research/engineering agents are implemented. Local database/code writers remain trusted operators, not a security boundary.
+
+
+## Milestone 8: public technical research collection
+
+`research-collect` uses Crossref's public works search and GitHub's public repository search. It runs as a trusted registered worker in the existing single-child execution engine. No model, API key, dependency installation or separate scheduler is needed. Schema 7 adds research_operations (pending-task configuration), research_runs (immutable per-execution configuration binding and write-once artifact digest), and immutable research_captures. Existing tables are preserved. Back up and run `init` before using the updated application; restart any running chat server to load new code.
+
+```powershell
+$python = '.\.venv\Scripts\python.exe'
+& $python -m orion init
+$project = & $python -m orion projects create 'Technical research' | ConvertFrom-Json
+$task = & $python -m orion tasks create 'Collect sources' --project $project.id --require-approval | ConvertFrom-Json
+& $python -m orion research configure $task.id --question 'retrieval augmented generation' --crossref-limit 2 --github-limit 2 --request-budget 2 --no-include-readme
+& $python -m orion research show $task.id
+$request = & $python -m orion approvals request $task.id research-collect --reason 'Review bounded public API collection' | ConvertFrom-Json
+& $python -m orion approvals get $request.id
+& $python -m orion approvals decide $request.id approved --reason 'Reviewed question, providers and limits'
+$run = & $python -m orion execute $task.id research-collect | ConvertFrom-Json
+& $python -m orion history $task.id
+& $python -m orion research packet $run.id
+& $python -m orion verifications $run.id
+& $python -m orion verify $run.id
+```
+
+Global `--database` and `--log-dir` still precede the command. `research show` takes a task ID; `research packet`, `verify` and `verifications` take an execution ID. Inspection never executes workers. A failed execution or verification returns CLI exit code 1 even when it also prints a structured result. Configuration is allowed only while pending; every configure call produces a new operation ID, invalidating old execution approvals. Changing question, providers, counts, budgets, byte limits, timeouts or README selection requires a fresh approval when the task is gated. Dependency checks still occur before claim and at finalization.
+
+### Limits and request policy
+
+Questions are nonempty and at most 256 UTF-8 bytes with no control characters. Provider selection is limited to crossref/github. Defaults: 3 search results per provider (maximum 5); 5 network requests total (maximum 8); 256 KiB per response (maximum 512 KiB); 5-second request timeout (maximum 10); 30-second worker timeout (range 5–60). Each source limit has its own CLI option. Research uses the configured worker timeout, also recorded in the approval proposal. Saved packets are capped at 8 MiB. Parent-side filesystem/verification work retains the existing engine's bounded-size but not separately hard-timed behavior.
+
+Searches run first, once per enabled provider, before optional READMEs. README collection is enabled by default, uses only the fixed GitHub README API, accepts UTF-8 base64 file content up to 64 KiB and never fetches arbitrary download URLs. It stops at budget/deadline boundaries. Source-record names cannot contain path traversal components. Missing, invalid, oversized, budget-skipped and failed READMEs are explicit. Use `--no-include-readme` for the smallest smoke test.
+
+Requests are unauthenticated HTTPS GETs to fixed api.crossref.org/api.github.com endpoints, with a descriptive User-Agent, explicit timeout, bounded read, content-type/status/JSON checks, no proxy inheritance and no redirects. Calls are sequential, at least one second apart within an operation. There are zero automatic retries. HTTP 403/429 conservatively stop subsequent requests to that provider for the operation; operators must respect provider cooldowns before starting a new operation. The application does not maintain a machine-wide rate-limit scheduler across independent databases. Provider/network errors are sanitized; remote error bodies are not printed. A child that exceeds the execution timeout is terminated under existing engine rules; partial in-memory responses may be lost on a hard timeout or crash.
+
+### Evidence and completion policy
+
+Packets contain operation/execution IDs, question/configuration, creation and retrieval timestamps, provider outcomes/counts, records, raw captured JSON responses, capture/evidence digests and limitations. Every record references an exact capture index and source-result index. Native metadata is preserved without inventing missing values: Crossref title/author/issued.date-parts/DOI/publisher/container-title/abstract/URL; GitHub owner/name/description/language/html_url/default_branch/stargazers_count/forks_count/updated_at. Crossref year remains in its native issued date-parts representation. Evidence contains the returned title/abstract or description and optional decoded README; metadata is not represented as paper full text. Missing fields are listed. Abstract markup is retained as untrusted text.
+
+Stable identities use DOI (case-folded), GitHub numeric repository ID, or a canonical metadata hash when Crossref supplies no DOI. Missing publication URLs fall back to the discovery API URL and missing metadata remains visible. Duplicate identities within a provider use the first returned record consistently; returned_count and record_count expose deduplication. Each evidence digest hashes canonical JSON of the original metadata plus evidence content. Retrieval timestamps describe collection, not independent source authentication.
+
+Partial provider failure preserves successful records and failure details. A packet can pass structural/provenance verification while documenting an outage. At least one successful provider search is required for task success; an empty successful search may legitimately complete with zero records. If all providers fail, the engine saves/verifies the failure packet but marks execution failed. Results are bounded search samples, not exhaustive literature reviews. Popularity is not a quality/security/maintenance assessment.
+
+The independent research verifier does not call the collector, its connectors or worker validator and performs no network requests. It rereads managed artifact bytes, checks the original artifact digest and operation/capture bindings, independently checks provider envelopes, selected records, first-occurrence deduplication, exact metadata/evidence, source URLs, query/time attribution, README references, failures/counts and canonical evidence digests. Verification records use the existing immutable table and events. A later failed verification blocks downstream dependencies without rewriting a past successful execution. This checks internal provenance against responses captured by trusted local code; it does not certify factual correctness, current source availability, cryptographically authenticate the provider's statements or defend against a malicious local database/code writer.
+
+The CEO planning context now describes research-collect. The existing plan schema can propose a task with a question and acceptance criteria; approving that plan creates approval-required tasks. An operator then configures the research task and approves its exact execution. No research tool is exposed to the chatbot, no source text is fed into a model here, and no real-model planning capability is claimed. Future synthesis must be a separate dependent task, with external text treated as untrusted evidence.
+
+Reference documentation: [Crossref REST API](https://www.crossref.org/documentation/retrieve-metadata/rest-api/), [GitHub repository search](https://docs.github.com/en/rest/search/search#search-repositories), [GitHub README API](https://docs.github.com/en/rest/repos/contents#get-a-repository-readme). These sources describe the metadata endpoints; a valid API response does not establish source correctness.

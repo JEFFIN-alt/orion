@@ -83,6 +83,11 @@ class VerificationService:
     def verify(self, execution_id):
         execution_id = identifier(execution_id)
         with self.database.connect() as c:
+            research = c.execute("SELECT 1 FROM research_runs WHERE execution_id=?", (execution_id,)).fetchone()
+        if research:
+            from .research_verify import ResearchVerifier
+            return ResearchVerifier(self.database).verify(execution_id)
+        with self.database.connect() as c:
             execution = c.execute("SELECT * FROM executions WHERE id=?", (execution_id,)).fetchone()
             binding = c.execute("SELECT * FROM execution_inputs WHERE execution_id=?", (execution_id,)).fetchone()
             if execution is None or binding is None: raise ValidationError("Execution has no CSV verification binding")

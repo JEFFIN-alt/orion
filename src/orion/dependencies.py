@@ -44,7 +44,8 @@ class DependencyService:
             return {**result, "reason": "Unknown worker verification policy"}
         if worker.required_verifier:
             verification = c.execute("SELECT * FROM verifications WHERE execution_id=? ORDER BY rowid DESC LIMIT 1", (execution["id"],)).fetchone()
-            binding = c.execute("SELECT * FROM execution_inputs WHERE execution_id=?", (execution["id"],)).fetchone()
+            binding_table = "research_runs" if execution["worker_id"] == "research-collect" else "execution_inputs"
+            binding = c.execute(f"SELECT * FROM {binding_table} WHERE execution_id=?", (execution["id"],)).fetchone()
             if verification is None:
                 return {**result, "reason": "Required verification is missing"}
             result["verification_id"] = verification["id"]

@@ -160,7 +160,7 @@ class DependencyTests(unittest.TestCase):
             c.execute('PRAGMA user_version=5')
         old.initialize();old.initialize()
         self.assertEqual(DependencyService(old).explain(self.a['id'])['classification'],'ready')
-        self.assertEqual(old.health()['schema_version'],6)
+        self.assertEqual(old.health()['schema_version'],7)
 
     def test_invalidation_after_claim_cannot_record_success(self):
         from orion.workers import REGISTRY
