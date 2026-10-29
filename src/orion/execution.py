@@ -16,6 +16,7 @@ from .workers import resolve
 from .approvals import authorize, proposal
 from .inputs import operation
 from .verification import VerificationService
+from .dependencies import DependencyService
 
 
 def _invoke(sender, handler, snapshot):
@@ -70,6 +71,7 @@ class ExecutionService:
                 raise ValidationError("Only pending tasks can execute")
             if c.execute("SELECT 1 FROM executions WHERE status='running'").fetchone():
                 raise ValidationError("An execution is already running; inspect history before recovery")
+            DependencyService(self.database).enforce(c, task["id"])
             approval_id = authorize(c, self.database, task["id"], worker_id, worker, self.timeout)
             proposed, _ = proposal(c, self.database, task["id"], worker_id, worker, self.timeout)
             csv_content = None
@@ -162,6 +164,10 @@ class ExecutionService:
             owner = c.execute("SELECT phase FROM execution_ownership WHERE execution_id=?", (execution_id,)).fetchone()
             if owner[0] not in ("not_started", "stopped"):
                 raise RuntimeError("Child termination evidence incomplete; inspect recovery before proceeding")
+            final_readiness = DependencyService(self.database).explain(task["id"], connection=c)
+            if any(not p["satisfied"] for p in final_readiness["prerequisites"]):
+                error = (error or "") + "\nPrerequisite evidence changed during execution; result is not eligible for success"
+                status, summary = "failed", "Dependency evidence invalidated during execution"
             now = timestamp()
             c.execute("UPDATE executions SET status=?, finished_at=?, summary=?, result_json=?, error=? WHERE id=? AND status='running'",
                       (status, now, summary, json.dumps(result) if result else None, error, execution_id))

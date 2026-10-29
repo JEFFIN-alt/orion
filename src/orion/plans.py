@@ -3,6 +3,7 @@ import json
 from uuid import uuid4
 from .models import ValidationError, NotFoundError, required
 from .service import Service, identifier, timestamp
+from .dependencies import DependencyService
 from .plan_schema import validate_plan, fingerprint, parse_plan
 
 
@@ -56,6 +57,9 @@ class PlanService:
                     description=task["description"]+"\nAcceptance criteria: "+json.dumps(task["acceptance_criteria"])+"\nProposed dependencies (plan keys): "+json.dumps(task["dependencies"])
                     created=service.create_task(project_id,task["title"],description,task["priority"],require_approval=True,connection=c)
                     tasks[task["key"]]=created["id"]
+                for task in body["tasks"]:
+                    for prerequisite in task["dependencies"]:
+                        DependencyService(self.database).add(tasks[task["key"]], tasks[prerequisite], connection=c)
             c.execute("UPDATE plans SET status=?,decided_at=?,reason=?,project_id=?,task_ids_json=? WHERE id=?",(decision,timestamp(),reason,project_id,json.dumps(tasks),row["id"]))
             audit(c,row["conversation_id"],"plan_"+decision,row["id"],{"project_id":project_id,"task_ids":tasks})
         return self.get(plan_id)

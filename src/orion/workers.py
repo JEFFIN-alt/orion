@@ -25,6 +25,7 @@ class Worker:
     handler: Callable[[dict], dict]
     validator: Callable[[dict, dict], None]
     version: str = "1"
+    required_verifier: str | None = None
     expected_input: str = "Consistent project/task snapshot supplied by engine"
     expected_output: str = "JSON report with project, tasks, state counts and snapshot time"
     capabilities: tuple = ("read supplied snapshot", "return JSON")
@@ -48,4 +49,4 @@ REGISTRY["csv-profile"] = Worker("csv-profile", "CSV profile", "Profile an expli
     expected_input="Registered input ID, digest-bound bytes, explicit limits",
     expected_output="JSON dataset structure, missing counts and decimal numeric summaries",
     capabilities=("read supplied bounded CSV bytes", "return JSON"),
-    completion_conditions="Saved artifact passes separate CSV verification")
+    completion_conditions="Saved artifact passes separate CSV verification", required_verifier="csv-independent")

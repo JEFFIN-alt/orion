@@ -1,6 +1,6 @@
 # Orion core foundation
 
-Python 3.12, SQLite and the standard library. A deterministic report worker is included. No AI model, API or dashboard is included. This milestone manages durable records; completed means a manually recorded execution state, not proof that tests passed, requirements were verified, or a deliverable was approved. Persistent human approval is available. CSV reports require separate deterministic result verification; general independent evaluation remains future work.
+Python 3.12, SQLite and the standard library. Orion includes persistent projects, approved plans, deterministic workers, a local CEO chat interface and dependency-aware workflow inspection. No model is bundled. A task marked completed is not by itself evidence of successful work: dependency eligibility requires execution evidence and any required verification. General independent evaluation remains future work.
 
 ## Setup and use (PowerShell)
 
@@ -26,9 +26,9 @@ Replace UUID placeholders with returned identifiers. `setup_dev.py` registers sr
 
 Global options `--database PATH --log-dir PATH` precede the command. Alternatively set ORION_DATABASE, ORION_LOG_DIR, ORION_HOME. Relative locations resolve against ORION_HOME, defaulting to this checkout root, not the caller's current directory. Defaults are data/orion.sqlite3 and logs/orion.log. Explicit locations are trusted operator configuration, not a security sandbox. Logs rotate at 1 MB with two backups. Runtime data, logs, secrets and the venv are ignored by Git.
 
-Run init explicitly. Schema version 4 uses PRAGMA user_version. Repeated initialization preserves data; unsupported versions fail. Every connection enables foreign keys. Writes use BEGIN IMMEDIATE transactions with a five-second lock timeout, rollback on failure, and explicit connection closure. State checking and transitions occur under the same write transaction. SQL identifiers come only from internal allowlists; input values are parameterized. Timestamps are UTC. No delete operation is exposed.
+Run init explicitly. Schema version 6 uses PRAGMA user_version. Repeated initialization preserves data; unsupported versions fail. Every connection enables foreign keys. Writes use BEGIN IMMEDIATE transactions with a five-second lock timeout, rollback on failure, and explicit connection closure. State checking and transitions occur under the same write transaction. SQL identifiers come only from internal allowlists; input values are parameterized. Timestamps are UTC. No delete operation is exposed.
 
-Use status for SQLite integrity and foreign-key diagnostics. For a simple backup, stop all Orion commands, then copy the database file to a separate backup location. Restore only while Orion is stopped and validate the copy with status. Initialization migrates versions 1, 2 and 3 to 4 transactionally. Automated backups are not implemented. Interrupted transactions roll back; previously persisted in_progress tasks remain visible for an explicit decision. There is no automatic task replay.
+Use status for SQLite integrity and foreign-key diagnostics. For a simple backup, stop all Orion commands, then copy the database file to a separate backup location. Restore only while Orion is stopped and validate the copy with status. Initialization migrates versions 1 through 5 to 6 transactionally. Automated backups are not implemented. Interrupted transactions roll back; previously persisted in_progress tasks remain visible for an explicit decision. There is no automatic task replay.
 
 ## State rules
 
@@ -42,14 +42,14 @@ Tasks start pending. Allowed transitions:
 - failed: pending, cancelled
 - completed and cancelled: terminal
 
-Self-transitions and all other transitions fail without modifying the record. Returning in_progress to pending is an explicit requeue after interruption; the operator must check whether repeating prior work is safe. Summary is optional error/outcome text, not independent verification. A transition updates the modification timestamp atomically. There is no scheduling, dependency graph or generated-code sandbox. Worker executions have persistent history and events.
+Self-transitions and all other transitions fail without modifying the record. Returning in_progress to pending is an explicit requeue after interruption; the operator must check whether repeating prior work is safe. Summary is optional error/outcome text, not independent verification. A transition updates the modification timestamp atomically. Dependency readiness is derived separately from task state; there is no automatic scheduler or generated-code sandbox. Worker executions have persistent history and events.
 
 The small service module owns validation and transactional SQL together to avoid repository wrappers that only forward calls. Database configuration and lifecycle, state definitions, logging and CLI remain separate. Tests use temporary databases and logs, including fresh-process CLI verification; they never use real application data.
 
 
 ## Milestone 3: deterministic execution
 
-Run `init` to migrate the existing database to schema 4. The migration adds executions and append-only events, preserving projects and tasks. Older schema versions must be explicitly migrated before other CLI operations.
+Run `init` to migrate the existing database to schema 6. The migration adds executions and append-only events, preserving projects and tasks. Older schema versions must be explicitly migrated before other CLI operations.
 
 ```powershell
 .\.venv\Scripts\python.exe -m orion workers
@@ -163,7 +163,7 @@ No charts, PDF export, data cleaning, missing-token inference, arbitrary encodin
 
 ## Milestone 6: local CEO chat
 
-Run `python -m orion init` to migrate to schema 5, then `python -m orion chat`. Open http://127.0.0.1:8765 (use this exact host). Use the existing .venv interpreter. This is a local development HTTP application, not a public production service. No new Python dependencies are required. Stop with Ctrl+C. The UI includes conversations, selected project context, provider availability, model-labelled responses, structured plans and explicit decisions. Choose Propose plan for natural-language planning; ordinary Send message is discussion only.
+Run `python -m orion init` to migrate to schema 6, then `python -m orion chat`. Open http://127.0.0.1:8765 (use this exact host). Use the existing .venv interpreter. This is a local development HTTP application, not a public production service. No new Python dependencies are required. Stop with Ctrl+C. The UI includes conversations, selected project context, provider availability, model-labelled responses, structured plans and explicit decisions. Choose Propose plan for natural-language planning; ordinary Send message is discussion only.
 
 Schema 5 adds conversations, messages, immutable-content plans, append-only chat_events and a single inference claim. Existing tables are preserved. The UI calls application services; it contains no SQL. The service contract is Provider; OllamaProvider uses local HTTP /api/tags and /api/chat with no tools, proxies or redirects. Configuration: ORION_AI_PROVIDER=ollama, ORION_AI_ENDPOINT=http://127.0.0.1:11434, ORION_AI_MODEL=qwen3.5:2b-q4_K_M, ORION_AI_TIMEOUT=90, ORION_AI_CONTEXT=4096, ORION_AI_MAX_OUTPUT=1024. Endpoint validation permits only loopback. Model downloads are never automatic. `python -m orion ai-status` reports readiness.
 
@@ -194,8 +194,37 @@ Ollama's default model storage is outside this repository. Do not set OLLAMA_MOD
 
 Conversation listings are capped at 100, message retrieval at the latest 100, inference history at 20 recent messages and a bounded UTF-8 byte budget. The model context is limited through num_ctx; text byte budgeting is an approximation, not exact tokenization. Context contains only selected project metadata and up to ten task summaries, with a smaller excerpt sent to the model. No environment variables, credentials, files or whole database are sent. Context may omit older details. User messages are limited to 2000 UTF-8 bytes. Outputs are capped and plans are strictly validated: exact fields, up to 8 tasks, integer priorities, acceptance criteria, valid dependency references, no cycles. Invalid output is retained and accompanied by a system error; refine the request and choose Propose plan again.
 
-Plans are proposals until a human decision. Approval binds the displayed fingerprint, creates project/tasks through the existing service in one transaction, and records the decision. Repeated decisions fail. Plan content is immutable: revised proposals receive a new ID and fresh approval. Every generated task requires separate execution approval. Dependencies and acceptance criteria are retained in plan JSON and task descriptions, but dependencies are advisory; no dependency scheduler is introduced. The chatbot has no execution, shell, SQL, filesystem or browsing tools.
+Plans are proposals until a human decision. Approval binds the displayed fingerprint, creates project/tasks through the existing service in one transaction, and records the decision. Repeated decisions fail. Plan content is immutable: revised proposals receive a new ID and fresh approval. Every generated task requires separate execution approval. Acceptance criteria and dependency references are retained in plan JSON and task descriptions. Newly approved plans also register enforced task dependencies atomically (see Milestone 7). The chatbot has no execution, shell, SQL, filesystem or browsing tools.
 
 Only one inference claim per database is allowed. A timeout/uncertain connection outcome retains the claim because a disconnected client does not prove Ollama stopped computing. After stopping/restarting Ollama and ensuring the old Orion caller is gone, use `python -m orion ai-reset --confirm-service-restarted --reason "Restarted Ollama and checked prior request"`. An active non-uncertain owner cannot be reset. A hard crash may require this manual reset. This is not a machine-wide lock against other unrelated Ollama clients or other Orion databases; keep Ollama's parallelism at one and do not run competing clients.
 
 The web server validates Host, Origin and a per-server request token; model text and plans are rendered as text rather than HTML. No public authentication or remote deployment is supported. Browser automation was disabled during verification, so HTTP routes, missing-model behavior and JavaScript syntax were checked; rendered visual behavior remains unverified. Fake-provider tests and local HTTP fixtures validate integration only, not real AI quality. A real greeting and planning integration test must be run once Ollama/model installation is complete.
+
+
+## Milestone 7: dependency-aware workflows
+
+Run `init` explicitly to migrate to schema 6. Back up existing data first. The migration adds `task_dependencies` and its constraints/index/triggers without rebuilding existing tables. Each edge records dependent task, prerequisite and creation time. Foreign keys, unique pairs, same-project checks and a recursive cycle check protect registration. Edges cannot be rewritten; no removal API is provided. Registration is restricted to pending dependent tasks. Old plans approved before this migration are not retrospectively converted from descriptions; review and explicitly register dependencies for their pending tasks.
+
+```powershell
+$python = '.\.venv\Scripts\python.exe'
+& $python -m orion dependencies add <DEPENDENT_ID> <PREREQUISITE_ID>
+& $python -m orion dependencies show <TASK_ID>
+& $python -m orion dependencies graph <PROJECT_ID>
+& $python -m orion queue list <PROJECT_ID>
+& $python -m orion queue list <PROJECT_ID> --state ready
+& $python -m orion queue list <PROJECT_ID> --state waiting
+& $python -m orion queue list <PROJECT_ID> --state blocked
+& $python -m orion queue explain <TASK_ID>
+```
+
+Inspection uses a consistent read transaction and writes no task, execution or event records. Ordinary CLI diagnostic logging may still write to the log file. Output is JSON, sorted by descending priority, creation time and ID. Each task includes its persistent state, derived classification, exact prerequisite IDs, reasons and applicable execution/verification IDs. Inspection is bounded to 10000 project tasks and never starts workers.
+
+A prerequisite is eligible only if its task is completed, its latest attempt (highest attempt number for that task) succeeded, and its own prerequisites are eligible. Unknown workers fail closed. Worker.required_verifier declares independent verification policy. For csv-profile the most recently inserted verification for the applicable execution must pass using csv-independent and match both input and artifact digests recorded for that execution. A missing verification or a later failed/mismatched verification blocks eligibility; an explicit later passing re-verification can restore it. project-status requires engine validation, not independent verification. Manual completion, old successful attempts superseded by failure, and another task's success do not qualify.
+
+Ready means pending with eligible prerequisites; approval, valid worker inputs and the global execution slot still apply. Waiting means incomplete prerequisites or a task already in progress. Blocked means failed/cancelled/blocked task state, invalid success evidence or a blocked ancestor. Completed means successful evidence and eligible ancestors. These are derived classifications, never new mutable task states. Invalidating an ancestor affects descendants without rewriting their execution history.
+
+Plan approval resolves validated plan keys to created task IDs and registers all edges in the same project/task/decision transaction. Any error rolls everything back. Revised plans still need a fresh fingerprint-bound approval. All generated tasks still require execution approval. Dependency edges are included in execution approval fingerprints; worker metadata changes also require a fresh approval.
+
+Core execution checks prerequisites inside the existing BEGIN IMMEDIATE claim transaction, before consuming approval or creating an execution. Other database writers cannot change prerequisite evidence between that check and claim. Rejections append an audit event and create no execution. The single-worker safeguard remains. A second check under the final write transaction prevents recording success if prerequisite evidence became invalid while the worker ran.
+
+The worker runs outside the database transaction. Evidence can change after claim; Orion does not preempt the worker or undo its output. A final invalidation marks the attempt failed and retains artifacts for review. Later invalidations change derived queue status, not historical records. Queue evaluation trusts persisted evidence and does not continuously rehash artifact files; use explicit verification to detect changed bytes. Recovery remains conservative and manual; no automatic retry, scheduling loop, parallel workers, dependency deletion or general research/engineering agents are implemented. Local database/code writers remain trusted operators, not a security boundary.

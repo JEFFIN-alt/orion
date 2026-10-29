@@ -17,6 +17,9 @@ def proposal(c, database, task_id, worker_id, worker, timeout=10):
     data = {"task_id": task["id"], "worker_id": worker_id, "worker": worker.describe(),
             "timeout": float(timeout), "data_directory": str(database.path.resolve().parent),
             "project": project, "tasks": [dict(row) for row in rows]}
+    dependencies = [dict(row) for row in c.execute("SELECT prerequisite_id,created_at FROM task_dependencies WHERE task_id=? ORDER BY prerequisite_id", (task["id"],))]
+    if dependencies:
+        data["dependencies"] = dependencies
     if worker_id == "csv-profile":
         from .inputs import operation
         data["csv_input"], _ = operation(c, database, task["id"])

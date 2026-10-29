@@ -18,6 +18,7 @@ from .verification import VerificationService
 from .provider import AIConfig
 from .ollama import OllamaProvider
 from .conversations import ConversationService
+from .dependencies import DependencyService
 
 
 def parser() -> argparse.ArgumentParser:
@@ -28,6 +29,17 @@ def parser() -> argparse.ArgumentParser:
     commands = root.add_subparsers(dest="command", required=True)
     commands.add_parser("init")
     commands.add_parser("status")
+    dependencies = commands.add_parser("dependencies").add_subparsers(dest="action",required=True)
+    add = dependencies.add_parser("add")
+    add.add_argument("id")
+    add.add_argument("prerequisite")
+    dependencies.add_parser("show").add_argument("id")
+    dependencies.add_parser("graph").add_argument("project")
+    queue = commands.add_parser("queue").add_subparsers(dest="action",required=True)
+    listing = queue.add_parser("list")
+    listing.add_argument("project")
+    listing.add_argument("--state",choices=("ready","waiting","blocked","completed"))
+    queue.add_parser("explain").add_argument("id")
     serve=commands.add_parser("chat")
     serve.add_argument("--port",type=int,default=8765)
     commands.add_parser("ai-status")
@@ -115,9 +127,16 @@ def main(argv: list[str] | None = None) -> int:
             if not config.database.is_file():
                 raise ValidationError("Database does not exist; run init first")
             health = db.health()
-            if health["schema_version"] != 5 or health["integrity"] != "ok" or health["foreign_key_errors"]:
+            if health["schema_version"] != 6 or health["integrity"] != "ok" or health["foreign_key_errors"]:
                 raise ValidationError(f"Database is not healthy: {health}")
-            if command == "chat":
+            if command in ("dependencies","queue"):
+                dependencies = DependencyService(db)
+                if args["action"] == "add": result = dependencies.add(args["id"],args["prerequisite"])
+                elif args["action"] in ("show","explain"): result = dependencies.explain(args["id"])
+                else:
+                    result = dependencies.project(args["project"])
+                    if args.get("state"): result["tasks"] = [t for t in result["tasks"] if t["classification"]==args["state"]]
+            elif command == "chat":
                 from .web_chat import serve
                 serve(db,AIConfig.load(),args["port"])
                 return 0

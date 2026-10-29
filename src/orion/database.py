@@ -93,6 +93,22 @@ MIGRATION_5 = (
 )
 
 
+MIGRATION_6 = (
+    """CREATE TABLE task_dependencies (task_id TEXT NOT NULL REFERENCES tasks(id),
+      prerequisite_id TEXT NOT NULL REFERENCES tasks(id), created_at TEXT NOT NULL,
+      PRIMARY KEY(task_id,prerequisite_id), CHECK(task_id!=prerequisite_id))""",
+    "CREATE INDEX dependency_prerequisite ON task_dependencies(prerequisite_id)",
+    """CREATE TRIGGER dependencies_validate BEFORE INSERT ON task_dependencies BEGIN
+      SELECT CASE WHEN (SELECT project_id FROM tasks WHERE id=NEW.task_id) !=
+        (SELECT project_id FROM tasks WHERE id=NEW.prerequisite_id) THEN RAISE(ABORT,'Cross-project dependency') END;
+      SELECT CASE WHEN EXISTS(WITH RECURSIVE ancestors(id) AS (
+        SELECT NEW.prerequisite_id UNION SELECT d.prerequisite_id FROM task_dependencies d JOIN ancestors a ON d.task_id=a.id)
+        SELECT 1 FROM ancestors WHERE id=NEW.task_id) THEN RAISE(ABORT,'Dependency cycle') END;
+      END""",
+    "CREATE TRIGGER dependencies_no_update BEFORE UPDATE ON task_dependencies BEGIN SELECT RAISE(ABORT,'Dependencies cannot be rewritten'); END",
+)
+
+
 class Database:
     def __init__(self, path: Path):
         self.path = Path(path)
@@ -118,7 +134,7 @@ class Database:
     def initialize(self) -> None:
         with self.connect(write=True) as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2, 3, 4, 5):
+            if version not in (0, 1, 2, 3, 4, 5, 6):
                 raise RuntimeError(f"Unsupported database schema version: {version}")
             if version == 0:
                 for statement in SCHEMA:
@@ -140,6 +156,10 @@ class Database:
                 for statement in MIGRATION_5:
                     connection.execute(statement)
                 connection.execute("PRAGMA user_version = 5")
+            if version < 6:
+                for statement in MIGRATION_6:
+                    connection.execute(statement)
+                connection.execute("PRAGMA user_version = 6")
 
     def health(self) -> dict:
         with self.connect() as connection:
