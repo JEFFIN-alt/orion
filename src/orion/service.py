@@ -1,4 +1,5 @@
 """Transactional project/task operations; SQL is kept here to avoid pass-through layers."""
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
@@ -67,17 +68,17 @@ class Service:
                 raise ValidationError(f"{key} must be text")
         return result
 
-    def create_project(self, name: str, description: str = "") -> dict:
+    def create_project(self, name: str, description: str = "", *, connection=None) -> dict:
         values = self.validate_fields("projects", {"name": name, "description": description})
         now, record_id = timestamp(), str(uuid4())
-        with self.database.connect(write=True) as connection:
+        with (self.database.connect(write=True) if connection is None else nullcontext(connection)) as connection:
             connection.execute("INSERT INTO projects VALUES (?,?,?,?,?,?)", (record_id, values["name"], description, "active", now, now))
             return self._get(connection, "projects", record_id)
 
-    def create_task(self, project_id: str, title: str, description: str = "", priority: int = 0, require_approval: bool = False) -> dict:
+    def create_task(self, project_id: str, title: str, description: str = "", priority: int = 0, require_approval: bool = False, *, connection=None) -> dict:
         values = self.validate_fields("tasks", {"title": title, "description": description, "priority": priority})
         now, record_id = timestamp(), str(uuid4())
-        with self.database.connect(write=True) as connection:
+        with (self.database.connect(write=True) if connection is None else nullcontext(connection)) as connection:
             project = self._get(connection, "projects", project_id)
             connection.execute("INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?)", (record_id, project["id"], values["title"], description, "pending", priority, now, now, None))
             if require_approval:

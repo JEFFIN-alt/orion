@@ -217,7 +217,7 @@ class CsvTests(unittest.TestCase):
             self.assertEqual(c.execute('SELECT id FROM approvals').fetchone()[0],aid)
             self.assertEqual(c.execute('SELECT id FROM events').fetchone()[0],event)
             self.assertEqual(c.execute('SELECT reason FROM recoveries').fetchone()[0],'reviewed')
-        self.assertEqual(old.health()['schema_version'],4)
+        self.assertEqual(old.health()['schema_version'],5)
 
     def test_import_hard_size_ceiling(self):
         self.source.write_bytes(b"x" * (DEFAULT_LIMITS["max_bytes"] + 1))

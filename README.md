@@ -160,3 +160,42 @@ CSV execution is marked succeeded only after a passed verification is persisted.
 verify EXECUTION_ID explicitly rechecks current files and appends a new immutable result (exit 1 on failed verification); verifications lists the history. execution/history include latest_verification for CSV runs. A later tamper check does not rewrite the historical successful attempt or initial verification: use latest_verification to assess current saved bytes. Verification proves the recorded digests at the time checked, not perpetual immutability. All verification/asset/analysis events avoid copying row contents into logs.
 
 No charts, PDF export, data cleaning, missing-token inference, arbitrary encodings/dialects, generated code, AI models or web dashboard are included. The next useful extension is a readable report view and additional numerical/property tests before expanding analysis scope.
+
+## Milestone 6: local CEO chat
+
+Run `python -m orion init` to migrate to schema 5, then `python -m orion chat`. Open http://127.0.0.1:8765 (use this exact host). Use the existing .venv interpreter. This is a local development HTTP application, not a public production service. No new Python dependencies are required. Stop with Ctrl+C. The UI includes conversations, selected project context, provider availability, model-labelled responses, structured plans and explicit decisions. Choose Propose plan for natural-language planning; ordinary Send message is discussion only.
+
+Schema 5 adds conversations, messages, immutable-content plans, append-only chat_events and a single inference claim. Existing tables are preserved. The UI calls application services; it contains no SQL. The service contract is Provider; OllamaProvider uses local HTTP /api/tags and /api/chat with no tools, proxies or redirects. Configuration: ORION_AI_PROVIDER=ollama, ORION_AI_ENDPOINT=http://127.0.0.1:11434, ORION_AI_MODEL=qwen3.5:2b-q4_K_M, ORION_AI_TIMEOUT=90, ORION_AI_CONTEXT=4096, ORION_AI_MAX_OUTPUT=1024. Endpoint validation permits only loopback. Model downloads are never automatic. `python -m orion ai-status` reports readiness.
+
+Ollama is a prerequisite, not bundled with Orion. At implementation time no Ollama installation/model was found and the service refused connections. No real inference was performed. Download/install Ollama from https://ollama.com/download/windows, then open a new PowerShell and check `ollama --version`. Close memory-heavy applications before trying inference. The official model tag https://ollama.com/library/qwen3.5:2b-q4_K_M lists a 1.9 GB download; installation itself also needs storage. Model fit/quality is unverified on this laptop.
+
+To run a single-request Ollama service, first quit any Ollama tray instance; then in a dedicated PowerShell:
+
+```powershell
+$env:OLLAMA_HOST='127.0.0.1:11434'
+$env:OLLAMA_NUM_PARALLEL='1'
+$env:OLLAMA_MAX_LOADED_MODELS='1'
+ollama serve
+```
+
+In a second PowerShell:
+
+```powershell
+ollama pull qwen3.5:2b-q4_K_M
+ollama list
+Set-Location 'C:\Users\JEFFIN\Projects\orion'
+$env:ORION_AI_MODEL='qwen3.5:2b-q4_K_M'
+$env:ORION_AI_CONTEXT='4096'
+.\.venv\Scripts\python.exe -m orion ai-status
+.\.venv\Scripts\python.exe -m orion chat
+```
+
+Ollama's default model storage is outside this repository. Do not set OLLAMA_MODELS inside the checkout. The adapter requests no thinking output and unloads after each response (keep_alive=0) to reduce idle memory use. Request errors never turn into fabricated assistant replies. Messages carry user/model/system/error kind plus actual returned model/provider and elapsed request time. Model reasoning/quality cannot be guaranteed; a valid schema does not mean a good plan.
+
+Conversation listings are capped at 100, message retrieval at the latest 100, inference history at 20 recent messages and a bounded UTF-8 byte budget. The model context is limited through num_ctx; text byte budgeting is an approximation, not exact tokenization. Context contains only selected project metadata and up to ten task summaries, with a smaller excerpt sent to the model. No environment variables, credentials, files or whole database are sent. Context may omit older details. User messages are limited to 2000 UTF-8 bytes. Outputs are capped and plans are strictly validated: exact fields, up to 8 tasks, integer priorities, acceptance criteria, valid dependency references, no cycles. Invalid output is retained and accompanied by a system error; refine the request and choose Propose plan again.
+
+Plans are proposals until a human decision. Approval binds the displayed fingerprint, creates project/tasks through the existing service in one transaction, and records the decision. Repeated decisions fail. Plan content is immutable: revised proposals receive a new ID and fresh approval. Every generated task requires separate execution approval. Dependencies and acceptance criteria are retained in plan JSON and task descriptions, but dependencies are advisory; no dependency scheduler is introduced. The chatbot has no execution, shell, SQL, filesystem or browsing tools.
+
+Only one inference claim per database is allowed. A timeout/uncertain connection outcome retains the claim because a disconnected client does not prove Ollama stopped computing. After stopping/restarting Ollama and ensuring the old Orion caller is gone, use `python -m orion ai-reset --confirm-service-restarted --reason "Restarted Ollama and checked prior request"`. An active non-uncertain owner cannot be reset. A hard crash may require this manual reset. This is not a machine-wide lock against other unrelated Ollama clients or other Orion databases; keep Ollama's parallelism at one and do not run competing clients.
+
+The web server validates Host, Origin and a per-server request token; model text and plans are rendered as text rather than HTML. No public authentication or remote deployment is supported. Browser automation was disabled during verification, so HTTP routes, missing-model behavior and JavaScript syntax were checked; rendered visual behavior remains unverified. Fake-provider tests and local HTTP fixtures validate integration only, not real AI quality. A real greeting and planning integration test must be run once Ollama/model installation is complete.

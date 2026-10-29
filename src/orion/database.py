@@ -70,6 +70,29 @@ MIGRATION_4 = (
 )
 
 
+MIGRATION_5 = (
+    """CREATE TABLE conversations (id TEXT PRIMARY KEY, title TEXT NOT NULL,
+      project_id TEXT REFERENCES projects(id), created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""",
+    """CREATE TABLE messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id),
+      role TEXT NOT NULL CHECK(role IN ('user','assistant','system')), kind TEXT NOT NULL CHECK(kind IN ('user','model','status','error')),
+      content TEXT NOT NULL, provider TEXT, model TEXT, elapsed_seconds REAL, created_at TEXT NOT NULL)""",
+    "CREATE INDEX conversation_messages ON messages(conversation_id,created_at)",
+    """CREATE TABLE plans (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id),
+      message_id TEXT NOT NULL UNIQUE REFERENCES messages(id), body_json TEXT NOT NULL, fingerprint TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('proposed','approved','rejected')), created_at TEXT NOT NULL,
+      decided_at TEXT, reason TEXT, project_id TEXT REFERENCES projects(id), task_ids_json TEXT)""",
+    """CREATE TRIGGER plans_content_immutable BEFORE UPDATE ON plans
+      WHEN NEW.body_json != OLD.body_json OR NEW.fingerprint != OLD.fingerprint OR (OLD.status!='proposed' AND NEW.status!=OLD.status)
+      BEGIN SELECT RAISE(ABORT,'Plan content and decisions cannot be rewritten'); END""",
+    """CREATE TABLE chat_events (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id),
+      plan_id TEXT REFERENCES plans(id), event_type TEXT NOT NULL, details_json TEXT NOT NULL, created_at TEXT NOT NULL)""",
+    "CREATE TRIGGER chat_events_no_update BEFORE UPDATE ON chat_events BEGIN SELECT RAISE(ABORT,'Chat events are append-only'); END",
+    "CREATE TRIGGER chat_events_no_delete BEFORE DELETE ON chat_events BEGIN SELECT RAISE(ABORT,'Chat events are append-only'); END",
+    """CREATE TABLE inference_claim (slot INTEGER PRIMARY KEY CHECK(slot=1), token TEXT NOT NULL,
+      owner_pid INTEGER NOT NULL, started_at TEXT NOT NULL, uncertain INTEGER NOT NULL DEFAULT 0)""",
+)
+
+
 class Database:
     def __init__(self, path: Path):
         self.path = Path(path)
@@ -95,7 +118,7 @@ class Database:
     def initialize(self) -> None:
         with self.connect(write=True) as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2, 3, 4):
+            if version not in (0, 1, 2, 3, 4, 5):
                 raise RuntimeError(f"Unsupported database schema version: {version}")
             if version == 0:
                 for statement in SCHEMA:
@@ -113,6 +136,10 @@ class Database:
                 for statement in MIGRATION_4:
                     connection.execute(statement)
                 connection.execute("PRAGMA user_version = 4")
+            if version < 5:
+                for statement in MIGRATION_5:
+                    connection.execute(statement)
+                connection.execute("PRAGMA user_version = 5")
 
     def health(self) -> dict:
         with self.connect() as connection:

@@ -15,6 +15,9 @@ from .approvals import ApprovalService
 from .recovery import RecoveryService
 from .inputs import InputService, DEFAULT_LIMITS
 from .verification import VerificationService
+from .provider import AIConfig
+from .ollama import OllamaProvider
+from .conversations import ConversationService
 
 
 def parser() -> argparse.ArgumentParser:
@@ -25,6 +28,12 @@ def parser() -> argparse.ArgumentParser:
     commands = root.add_subparsers(dest="command", required=True)
     commands.add_parser("init")
     commands.add_parser("status")
+    serve=commands.add_parser("chat")
+    serve.add_argument("--port",type=int,default=8765)
+    commands.add_parser("ai-status")
+    reset=commands.add_parser("ai-reset")
+    reset.add_argument("--confirm-service-restarted",action="store_true",required=True)
+    reset.add_argument("--reason",required=True)
     commands.add_parser("workers")
     run = commands.add_parser("execute")
     run.add_argument("id")
@@ -106,9 +115,16 @@ def main(argv: list[str] | None = None) -> int:
             if not config.database.is_file():
                 raise ValidationError("Database does not exist; run init first")
             health = db.health()
-            if health["schema_version"] != 4 or health["integrity"] != "ok" or health["foreign_key_errors"]:
+            if health["schema_version"] != 5 or health["integrity"] != "ok" or health["foreign_key_errors"]:
                 raise ValidationError(f"Database is not healthy: {health}")
-            if command == "inputs":
+            if command == "chat":
+                from .web_chat import serve
+                serve(db,AIConfig.load(),args["port"])
+                return 0
+            elif command in ("ai-status","ai-reset"):
+                chat=ConversationService(db,OllamaProvider(AIConfig.load()))
+                result=chat.status() if command=="ai-status" else chat.reset_claim(args["reason"])
+            elif command == "inputs":
                 inputs = InputService(db)
                 if args["action"] == "import":
                     result = inputs.import_csv(args["source"], args["max_bytes"])

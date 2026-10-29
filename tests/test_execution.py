@@ -108,7 +108,7 @@ class ExecutionTests(unittest.TestCase):
         old.initialize()
         from orion.service import Service
         self.assertEqual(Service(old).get("tasks", self.task["id"]), self.task)
-        self.assertEqual(old.health()["schema_version"], 4)
+        self.assertEqual(old.health()["schema_version"], 5)
 
     def test_events_immutable_and_blocked(self):
         self.service.transition("tasks", self.task["id"], "in_progress")
