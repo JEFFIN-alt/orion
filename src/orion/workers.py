@@ -59,3 +59,12 @@ REGISTRY['research-collect'] = Worker('research-collect', 'Public technical evid
     expected_output='JSON evidence packet with captured public API responses and provenance',
     capabilities=('HTTPS GET to fixed Crossref/GitHub API endpoints', 'read supplied configuration', 'return JSON'),
     completion_conditions='At least one provider search succeeds; saved packet passes independent provenance checks')
+
+
+from .synthesis_worker import synthesize, validate_envelope
+REGISTRY['research-synthesize'] = Worker('research-synthesize','Evidence-grounded research analyst',
+    'Analyse a verified research packet through the configured language model',synthesize,validate_envelope,
+    required_verifier='synthesis-independent',expected_input='Verified research execution, bounded excerpts, approved model/configuration',
+    expected_output='Separate synthesis envelope with strict cited JSON analysis and actual provider metadata',
+    capabilities=('call configured provider through existing interface','read supplied evidence projection','return JSON'),
+    completion_conditions='Provider completes and independent schema/provenance/citation verification passes; factual quality requires human review')

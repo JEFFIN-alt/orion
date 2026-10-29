@@ -6,12 +6,12 @@ from urllib.parse import urlsplit,parse_qs
 from pathlib import Path
 from .conversations import ConversationService
 from .plans import PlanService
-from .ollama import OllamaProvider
+from .provider import create_provider
 from .models import ValidationError
 
 
 def make_server(database,config,port=8765,provider=None):
-    chat=ConversationService(database,provider or OllamaProvider(config))
+    chat=ConversationService(database,provider or create_provider(config))
     plans=PlanService(database)
     token=secrets.token_urlsafe(32)
     class Handler(BaseHTTPRequestHandler):

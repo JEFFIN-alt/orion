@@ -91,6 +91,8 @@ class ConversationService:
         from .recovery import process_state
         with self.database.connect(write=True) as c:
             row=c.execute("SELECT * FROM inference_claim").fetchone()
+            if c.execute("SELECT 1 FROM executions WHERE worker_id='research-synthesize' AND status='running'").fetchone():
+                raise ValidationError('Cannot reset inference during a running synthesis execution')
             if row and not row["uncertain"] and process_state(row["owner_pid"])!="stopped": raise ValidationError("Inference owner is active; cannot reset")
             c.execute("DELETE FROM inference_claim")
             latest=c.execute("SELECT id FROM conversations ORDER BY updated_at DESC LIMIT 1").fetchone()

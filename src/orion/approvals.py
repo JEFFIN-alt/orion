@@ -27,6 +27,10 @@ def proposal(c, database, task_id, worker_id, worker, timeout=10):
         from .research import operation
         data["research"] = operation(c, task["id"])
         data["timeout"] = float(data["research"]["configuration"]["execution_timeout"])
+    if worker_id == "research-synthesize":
+        from .synthesis import operation
+        data["synthesis"] = operation(c, database, task["id"])
+        data["timeout"] = float(data["synthesis"]["configuration"]["execution_timeout"])
     encoded = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     if len(encoded) > 8_000_000:
         raise ValidationError("Report snapshot exceeds 8 MB limit")

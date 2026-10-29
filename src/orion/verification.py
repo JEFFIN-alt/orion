@@ -83,7 +83,11 @@ class VerificationService:
     def verify(self, execution_id):
         execution_id = identifier(execution_id)
         with self.database.connect() as c:
+            synthesis = c.execute("SELECT 1 FROM synthesis_runs WHERE execution_id=?", (execution_id,)).fetchone()
             research = c.execute("SELECT 1 FROM research_runs WHERE execution_id=?", (execution_id,)).fetchone()
+        if synthesis:
+            from .synthesis_verify import SynthesisVerifier
+            return SynthesisVerifier(self.database).verify(execution_id)
         if research:
             from .research_verify import ResearchVerifier
             return ResearchVerifier(self.database).verify(execution_id)

@@ -146,7 +146,7 @@ class ChatTests(unittest.TestCase):
         old.initialize();old.initialize()
         with old.connect() as c:
             for name in names: self.assertEqual([tuple(row) for row in c.execute('SELECT * FROM '+name)],before[name])
-        self.assertEqual(old.health()['schema_version'],7)
+        self.assertEqual(old.health()['schema_version'],8)
 
 
 class OllamaHttpTests(unittest.TestCase):

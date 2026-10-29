@@ -53,3 +53,12 @@ class Provider(Protocol):
     config: AIConfig
     def availability(self) -> dict: ...
     def chat(self, messages: list[dict], schema: dict | None = None) -> Response: ...
+
+
+def create_provider(config: AIConfig | None = None) -> Provider:
+    """One production factory shared by chat and synthesis. No fake fallback."""
+    config = config or AIConfig.load()
+    if config.provider == 'ollama':
+        from .ollama import OllamaProvider
+        return OllamaProvider(config)
+    raise ValidationError('Unsupported configured AI provider')

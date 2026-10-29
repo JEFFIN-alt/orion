@@ -15,8 +15,7 @@ from .approvals import ApprovalService
 from .recovery import RecoveryService
 from .inputs import InputService, DEFAULT_LIMITS
 from .verification import VerificationService
-from .provider import AIConfig
-from .ollama import OllamaProvider
+from .provider import AIConfig, create_provider
 from .conversations import ConversationService
 from .dependencies import DependencyService
 from .research import ResearchService, DEFAULTS
@@ -51,6 +50,15 @@ def parser() -> argparse.ArgumentParser:
     configure_research.add_argument('--include-readme',action=argparse.BooleanOptionalAction,default=True)
     for key in ('crossref_limit','github_limit','request_budget','max_response_bytes','request_timeout','execution_timeout'):
         configure_research.add_argument('--'+key.replace('_','-'),type=int,default=DEFAULTS[key])
+    from .synthesis import DEFAULTS as SYNTHESIS_DEFAULTS
+    synthesis = commands.add_parser('synthesis').add_subparsers(dest='action',required=True)
+    for action in ('show','evidence','packet','summary'):
+        synthesis.add_parser(action).add_argument('id')
+    synthesis_config = synthesis.add_parser('configure')
+    synthesis_config.add_argument('id')
+    synthesis_config.add_argument('--source-execution',required=True)
+    for key,value in SYNTHESIS_DEFAULTS.items():
+        synthesis_config.add_argument('--'+key.replace('_','-'),type=int,default=value)
     serve=commands.add_parser("chat")
     serve.add_argument("--port",type=int,default=8765)
     commands.add_parser("ai-status")
@@ -138,7 +146,7 @@ def main(argv: list[str] | None = None) -> int:
             if not config.database.is_file():
                 raise ValidationError("Database does not exist; run init first")
             health = db.health()
-            if health["schema_version"] != 7 or health["integrity"] != "ok" or health["foreign_key_errors"]:
+            if health["schema_version"] != 8 or health["integrity"] != "ok" or health["foreign_key_errors"]:
                 raise ValidationError(f"Database is not healthy: {health}")
             if command in ("dependencies","queue"):
                 dependencies = DependencyService(db)
@@ -152,12 +160,17 @@ def main(argv: list[str] | None = None) -> int:
                 action = args.pop('action')
                 task_id = args.pop('id')
                 result = research.configure(task_id,**args) if action=='configure' else research.get(task_id) if action=='show' else research.packet(task_id)
+            elif command == 'synthesis':
+                from .synthesis import SynthesisService
+                synthesis = SynthesisService(db)
+                action = args.pop('action'); record_id = args.pop('id')
+                result = synthesis.configure(record_id,**args) if action=='configure' else synthesis.packet(record_id) if action=='packet' else synthesis.summary(record_id) if action=='summary' else synthesis.get(record_id)
             elif command == "chat":
                 from .web_chat import serve
                 serve(db,AIConfig.load(),args["port"])
                 return 0
             elif command in ("ai-status","ai-reset"):
-                chat=ConversationService(db,OllamaProvider(AIConfig.load()))
+                chat=ConversationService(db,create_provider())
                 result=chat.status() if command=="ai-status" else chat.reset_claim(args["reason"])
             elif command == "inputs":
                 inputs = InputService(db)

@@ -120,6 +120,14 @@ MIGRATION_7 = (
 )
 
 
+MIGRATION_8 = (
+    "CREATE TABLE synthesis_operations (task_id TEXT PRIMARY KEY REFERENCES tasks(id), operation_id TEXT NOT NULL UNIQUE, source_execution TEXT NOT NULL REFERENCES executions(id), config_json TEXT NOT NULL, configured_at TEXT NOT NULL)",
+    "CREATE TABLE synthesis_runs (execution_id TEXT PRIMARY KEY REFERENCES executions(id), operation_json TEXT NOT NULL, sha256 TEXT NOT NULL, artifact_digest TEXT)",
+    "CREATE TRIGGER synthesis_runs_binding BEFORE UPDATE ON synthesis_runs WHEN NEW.execution_id!=OLD.execution_id OR NEW.operation_json!=OLD.operation_json OR NEW.sha256!=OLD.sha256 OR OLD.artifact_digest IS NOT NULL BEGIN SELECT RAISE(ABORT,'Synthesis binding is immutable'); END",
+    "CREATE TRIGGER synthesis_runs_no_delete BEFORE DELETE ON synthesis_runs BEGIN SELECT RAISE(ABORT,'Synthesis binding is immutable'); END",
+)
+
+
 class Database:
     def __init__(self, path: Path):
         self.path = Path(path)
@@ -145,7 +153,7 @@ class Database:
     def initialize(self) -> None:
         with self.connect(write=True) as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2, 3, 4, 5, 6, 7):
+            if version not in (0, 1, 2, 3, 4, 5, 6, 7, 8):
                 raise RuntimeError(f"Unsupported database schema version: {version}")
             if version == 0:
                 for statement in SCHEMA:
@@ -176,6 +184,11 @@ class Database:
                 for statement in MIGRATION_7:
                     connection.execute(statement)
                 connection.execute("PRAGMA user_version = 7")
+
+            if version < 8:
+                for statement in MIGRATION_8:
+                    connection.execute(statement)
+                connection.execute("PRAGMA user_version = 8")
 
     def health(self) -> dict:
         with self.connect() as connection:

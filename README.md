@@ -26,9 +26,9 @@ Replace UUID placeholders with returned identifiers. `setup_dev.py` registers sr
 
 Global options `--database PATH --log-dir PATH` precede the command. Alternatively set ORION_DATABASE, ORION_LOG_DIR, ORION_HOME. Relative locations resolve against ORION_HOME, defaulting to this checkout root, not the caller's current directory. Defaults are data/orion.sqlite3 and logs/orion.log. Explicit locations are trusted operator configuration, not a security sandbox. Logs rotate at 1 MB with two backups. Runtime data, logs, secrets and the venv are ignored by Git.
 
-Run init explicitly. Schema version 7 uses PRAGMA user_version. Repeated initialization preserves data; unsupported versions fail. Every connection enables foreign keys. Writes use BEGIN IMMEDIATE transactions with a five-second lock timeout, rollback on failure, and explicit connection closure. State checking and transitions occur under the same write transaction. SQL identifiers come only from internal allowlists; input values are parameterized. Timestamps are UTC. No delete operation is exposed.
+Run init explicitly. Schema version 8 uses PRAGMA user_version. Repeated initialization preserves data; unsupported versions fail. Every connection enables foreign keys. Writes use BEGIN IMMEDIATE transactions with a five-second lock timeout, rollback on failure, and explicit connection closure. State checking and transitions occur under the same write transaction. SQL identifiers come only from internal allowlists; input values are parameterized. Timestamps are UTC. No delete operation is exposed.
 
-Use status for SQLite integrity and foreign-key diagnostics. For a simple backup, stop all Orion commands, then copy the database file to a separate backup location. Restore only while Orion is stopped and validate the copy with status. Initialization migrates versions 1 through 6 to 7 transactionally. Automated backups are not implemented. Interrupted transactions roll back; previously persisted in_progress tasks remain visible for an explicit decision. There is no automatic task replay.
+Use status for SQLite integrity and foreign-key diagnostics. For a simple backup, stop all Orion commands, then copy the database file to a separate backup location. Restore only while Orion is stopped and validate the copy with status. Initialization migrates versions 1 through 7 to 8 transactionally. Automated backups are not implemented. Interrupted transactions roll back; previously persisted in_progress tasks remain visible for an explicit decision. There is no automatic task replay.
 
 ## State rules
 
@@ -49,7 +49,7 @@ The small service module owns validation and transactional SQL together to avoid
 
 ## Milestone 3: deterministic execution
 
-Run `init` to migrate the existing database to schema 7. The migration adds executions and append-only events, preserving projects and tasks. Older schema versions must be explicitly migrated before other CLI operations.
+Run `init` to migrate the existing database to schema 8. The migration adds executions and append-only events, preserving projects and tasks. Older schema versions must be explicitly migrated before other CLI operations.
 
 ```powershell
 .\.venv\Scripts\python.exe -m orion workers
@@ -163,7 +163,7 @@ No charts, PDF export, data cleaning, missing-token inference, arbitrary encodin
 
 ## Milestone 6: local CEO chat
 
-Run `python -m orion init` to migrate to schema 7, then `python -m orion chat`. Open http://127.0.0.1:8765 (use this exact host). Use the existing .venv interpreter. This is a local development HTTP application, not a public production service. No new Python dependencies are required. Stop with Ctrl+C. The UI includes conversations, selected project context, provider availability, model-labelled responses, structured plans and explicit decisions. Choose Propose plan for natural-language planning; ordinary Send message is discussion only.
+Run `python -m orion init` to migrate to schema 8, then `python -m orion chat`. Open http://127.0.0.1:8765 (use this exact host). Use the existing .venv interpreter. This is a local development HTTP application, not a public production service. No new Python dependencies are required. Stop with Ctrl+C. The UI includes conversations, selected project context, provider availability, model-labelled responses, structured plans and explicit decisions. Choose Propose plan for natural-language planning; ordinary Send message is discussion only.
 
 Schema 5 adds conversations, messages, immutable-content plans, append-only chat_events and a single inference claim. Existing tables are preserved. The UI calls application services; it contains no SQL. The service contract is Provider; OllamaProvider uses local HTTP /api/tags and /api/chat with no tools, proxies or redirects. Configuration: ORION_AI_PROVIDER=ollama, ORION_AI_ENDPOINT=http://127.0.0.1:11434, ORION_AI_MODEL=qwen3.5:2b-q4_K_M, ORION_AI_TIMEOUT=90, ORION_AI_CONTEXT=4096, ORION_AI_MAX_OUTPUT=1024. Endpoint validation permits only loopback. Model downloads are never automatic. `python -m orion ai-status` reports readiness.
 
@@ -274,3 +274,57 @@ The independent research verifier does not call the collector, its connectors or
 The CEO planning context now describes research-collect. The existing plan schema can propose a task with a question and acceptance criteria; approving that plan creates approval-required tasks. An operator then configures the research task and approves its exact execution. No research tool is exposed to the chatbot, no source text is fed into a model here, and no real-model planning capability is claimed. Future synthesis must be a separate dependent task, with external text treated as untrusted evidence.
 
 Reference documentation: [Crossref REST API](https://www.crossref.org/documentation/retrieve-metadata/rest-api/), [GitHub repository search](https://docs.github.com/en/rest/search/search#search-repositories), [GitHub README API](https://docs.github.com/en/rest/repos/contents#get-a-repository-readme). These sources describe the metadata endpoints; a valid API response does not establish source correctness.
+
+
+## Milestone 9: research synthesis
+
+`research-synthesize` consumes a successful, currently eligible `research-collect` execution in the same project. It never accepts a source path. Selection reads the managed UUID artifact, verifies its original SHA-256, configuration/capture digests and provenance structure, and requires the latest matching passed research verification. The selected attempt must be the research task's latest eligible execution; missing/failed/tampered evidence is refused. The original packet is never replaced.
+
+Schema 8 adds only synthesis_operations (task configuration) and synthesis_runs (immutable execution binding with write-once output digest). Existing executions, ownership, events, artifacts, verification records and inference_claim are reused. Back up the database and run `init`; restart a running chat process to load current code. Configuration adds the research task as a dependency and permanently enables execution approval. Reconfiguration preserves old dependencies conservatively; there is no implicit edge deletion.
+
+```powershell
+$python = '.\.venv\Scripts\python.exe'
+& $python -m orion init
+# Use the project and execution IDs returned by a completed research collection.
+$task = & $python -m orion tasks create 'Analyse research evidence' --project <PROJECT_ID> | ConvertFrom-Json
+& $python -m orion synthesis configure $task.id --source-execution <RESEARCH_EXECUTION_ID>
+& $python -m orion synthesis evidence $task.id
+& $python -m orion synthesis show $task.id
+$request = & $python -m orion approvals request $task.id research-synthesize --reason 'Review source, excerpts, model and limits' | ConvertFrom-Json
+& $python -m orion approvals get $request.id
+& $python -m orion approvals decide $request.id approved --reason 'Reviewed exact synthesis operation'
+$run = & $python -m orion execute $task.id research-synthesize | ConvertFrom-Json
+& $python -m orion synthesis summary $run.id
+& $python -m orion synthesis packet $run.id
+& $python -m orion verifications $run.id
+& $python -m orion history $task.id
+& $python -m orion verify $run.id
+```
+
+`show` and `evidence` are task-ID read-only inspections of the selected input, evidence digest, latest verification ID, current configured model and bounded projection. They refuse invalid upstream evidence. `packet` and `summary` take a synthesis execution ID; summary shows actual execution/provider outcome, findings, recommendation or refusal, references, warnings, limitations and verification history. Inspection does not invoke a model. `verify` explicitly appends an independent verification record. Failed execute/verify commands print their structured result and return exit code 1.
+
+### Provider and concurrency
+
+The existing Provider.chat(messages, schema) protocol and OllamaProvider adapter are reused. One create_provider factory serves chat and synthesis; the existing configuration currently supports only Ollama. Synthesis business logic uses the protocol and does not implement another HTTP client or automatically substitute fixtures. Model, provider, endpoint, timeout, context and output settings come from AIConfig/ORION_AI_* and are included in approval fingerprints along with source execution, evidence digest, verification ID, source projection and synthesis parameters. Changing them invalidates old approvals. A mutable local model tag is not a cryptographic model-weight identity; actual returned model/provider are also recorded.
+
+Synthesis claims the existing database-wide inference slot under the execution claim transaction. Chat and synthesis cannot overlap within that database. The worker uses the existing spawned-child timeout (default and maximum 60 seconds for synthesis; configurable 5–60). AIConfig's provider timeout can be longer; the worker deadline takes precedence and may terminate the client while server inference continues. Prefer an explicitly configured provider timeout shorter than the worker deadline when testing. Unknown failures, provider uncertainty and hard timeouts retain the inference claim. Inspect ai-status, stop/restart the model service, resolve any running execution conservatively, then use the existing `ai-reset --confirm-service-restarted --reason TEXT`. Reset refuses while synthesis is running. Separate databases do not share the inference lock; do not use them to run concurrent model workloads. No model is installed/downloaded and no provider fallback is automatic.
+
+### Prompt and analysis contract
+
+Defaults: all source records, maximum 10; leading 800 characters per evidence field (80–2000 configurable); 12000 total UTF-8 prompt bytes (2000–20000 configurable), further capped at twice configured context size; 16000 output bytes (1000–16000 configurable). The prompt budget includes messages and JSON schema. This byte heuristic is not exact tokenization and cannot guarantee every model's context behavior. Too many records or oversized prompts are rejected; no records are silently dropped. Reduce excerpt_chars explicitly if needed. Selected metadata fields, all source IDs, provider outcomes and known limitations are included; each shortened evidence field records original/included character counts. The prompt explicitly states it contains selected metadata and excerpts, not full papers or complete READMEs. Unrelated conversations, environment variables, credentials and arbitrary files are never supplied.
+
+The model receives a system instruction plus a JSON evidence message. Source content is untrusted data, never tools or permission changes. The model has no tool interface and no database/filesystem/shell capability. Prompt injection can still distort prose; local validation cannot guarantee semantic obedience or reasoning quality.
+
+Analysis is exact-field JSON: schema_version, execution_id, question, executive_summary, key_findings, comparisons, advantages, disadvantages, evidence_limitations, unresolved_questions, recommendation, next_experiments and confidence. Claim objects contain text and source_ids. Text is bounded to 1200 characters per field; each list has at most 8 entries and references at most 10 unique IDs. Confidence is low/medium/high with an explanation. Unknown fields, duplicate keys, nonfinite JSON, wrong types, excessive lists and mismatched execution/question are rejected. A recommendation can explicitly be unsupported with a reason and empty references. With zero sources, factual claim lists must be empty and no supported recommendation is allowed.
+
+### Citations, persistence and independent verification
+
+Every summary/finding/comparison/advantage/disadvantage and supported recommendation requires actual input source IDs. The only summary exception is a no-evidence summary when no records exist. Limitations, unresolved questions, confidence explanation and proposed experiments are designated non-claim fields and need no external citations. Humans must detect factual claims improperly placed in those fields; a deterministic validator cannot reliably classify arbitrary prose. Withheld recommendation text must explain insufficiency, not introduce uncited factual claims.
+
+Reference validation is a separate deterministic step. IDs resolve to original source URLs, provider, evidence digest and evidence kinds. Cited records with fewer than 80 characters of non-title evidence receive a sparse-evidence warning. This heuristic identifies thin evidence, not semantic support. Citations do not prove entailment, correctness, source quality or recommendation suitability. No model-generated URL substitutes for an input ID.
+
+The separate artifact envelope records upstream execution/digest, worker version, configured model, actual response metadata, timestamp and raw model response text. Invalid model JSON and unknown references remain inspectable in a failed artifact. Oversized provider output is rejected without retaining the oversized body. Provider errors save an error envelope when possible; hard process crashes/timeouts may leave no artifact. The source packet remains unchanged.
+
+The independent verifier does not call the worker, worker validator or model. It rereads the saved envelope and current eligible upstream packet, rechecks both digests and projection, parses the raw response against the shared declarative schema, and independently runs source resolution/citation policy. It persists passed/failed results in the existing immutable verifications table as synthesis-independent. Research and synthesis verification histories remain separate. The engine also rechecks upstream eligibility/digest before finalization. Later invalidation blocks derived downstream readiness without rewriting historical execution records. Structural/provenance verification is not factual certification.
+
+Ordinary automated tests use explicitly named fixture providers and local HTTP fixtures. A successful fixture is not AI analysis. Real-model output quality, schema compliance and latency still require a separate installed-model integration test and human review. There is no synthesis-to-execution automation.
