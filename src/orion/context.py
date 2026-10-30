@@ -20,7 +20,7 @@ def project_context(database, project_id=None):
 def build_context(history, selected, context_limit, planning=False):
     system=SYSTEM
     if planning:
-        system += " Return only a JSON proposal matching the supplied schema. Include explicit assumptions, risks, unresolved questions, up to 8 tasks, dependencies by task key and testable acceptance criteria. This is a proposal, not completed work."
+        system += " Return only a JSON proposal matching the supplied schema. Produce a coherent sequence from prerequisites through implementation, integration, testing/verification, and packaging or deployment when relevant. Give each task complete dependency keys: integration must depend on the components it integrates, tests on the work they verify, and packaging on successful tests. Do not create a dependency when tasks are genuinely independent; never omit a prerequisite merely to shorten the graph. Acceptance criteria must be observable and measurable (specific command/result, persisted record, user flow, or threshold), not subjective phrases such as 'works well', 'logical', or 'not gibberish'. State assumptions and risks explicitly, including unresolved hardware facts. Distinguish system RAM, GPU VRAM, model file size, and context length; do not infer one from another. Do not propose downloads or hardware upgrades when constraints prohibit them. Include integration, test, and packaging tasks where the objective requires them, within the 8-task limit. This is a proposal, not completed work."
     budget=min(10000,context_limit*2)
     system += "\nSelected read-only context: " + json.dumps(selected,ensure_ascii=True)[:800]
     result=[{"role":"system","content":system}]

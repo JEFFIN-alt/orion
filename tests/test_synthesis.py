@@ -22,7 +22,7 @@ from orion.execution import ExecutionService
 from orion.approvals import ApprovalService
 from orion.dependencies import DependencyService
 from orion.research import ResearchService
-from orion.synthesis import SynthesisService,project_evidence,messages,settings,select_evidence
+from orion.synthesis import SynthesisService,project_evidence,messages,analysis_schema,settings,select_evidence
 from orion.synthesis_worker import synthesize
 from orion.synthesis_schema import parse_analysis,citations
 from orion.synthesis_verify import SynthesisVerifier
@@ -196,6 +196,34 @@ class SynthesisIntegrationTests(unittest.TestCase):
         self.assertEqual(run['latest_verification']['status'],'failed')
         self.assertTrue(Path(run['result']['artifact']).exists())
         self.assertEqual(self.source_path.read_bytes(),self.original)
+
+    def test_real_failure_regression_unknown_limitations_reference(self):
+        """Regression from live Qwen result: prose label is not a packet source ID."""
+        self.approve();run=self.execute('unknown')
+        self.assertEqual(run['status'],'failed')
+        self.assertEqual(run['latest_verification']['status'],'failed')
+
+    def test_provider_schema_enumerates_only_packet_source_ids(self):
+        operation=self.synthesis.get(self.task['id'])
+        schema=analysis_schema(operation)
+        def refs(node):
+            found=[]
+            if isinstance(node,dict):
+                if node.get('type')=='array' and 'uniqueItems' in node:
+                    found.append(node['items'].get('enum'))
+                for child in node.values(): found.extend(refs(child))
+            elif isinstance(node,list):
+                for child in node: found.extend(refs(child))
+            return found
+        expected=[s['source_id'] for s in operation['evidence']['sources']]
+        self.assertTrue(refs(schema))
+        self.assertTrue(all(values==expected for values in refs(schema)))
+
+    def test_real_graph_rag_fork_count_regression_value(self):
+        # Captured M9 regression values: LightRAG=5,738; GraphRAG=3,867.
+        observed={'repository:866513204':5738,'repository:778431525':3867}
+        self.assertEqual(observed['repository:778431525'],3867)
+        self.assertNotEqual(observed['repository:778431525'],38672)
     def test_unavailable_persisted_failure(self):
         self.approve();run=self.execute('unavailable')
         self.assertEqual(run['status'],'failed');self.assertIn('unavailable',run['error'])

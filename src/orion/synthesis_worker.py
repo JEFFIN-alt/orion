@@ -1,7 +1,7 @@
 """Provider-driven analysis; no fixture fallback or model-specific business logic."""
 from dataclasses import asdict
 from .provider import AIConfig,Provider,ProviderError,create_provider
-from .synthesis import messages
+from .synthesis import messages,analysis_schema
 from .synthesis_schema import SCHEMA
 from .service import timestamp
 from .research import canonical
@@ -16,7 +16,7 @@ def synthesize(snapshot,provider: Provider | None=None):
         'worker_version':'1','created_at':timestamp(),'configured_model':operation['model'],
         'response_metadata':None,'response_text':'','provider_error':None,'inference_uncertain':False}
     try:
-        response=provider.chat(messages(operation,snapshot['execution_id']),SCHEMA)
+        response=provider.chat(messages(operation,snapshot['execution_id']),analysis_schema(operation))
         if not isinstance(response.content,str): raise ProviderError('Provider returned non-text analysis')
         if len(response.content.encode())>operation['configuration']['max_response_bytes']:
             result['response_metadata']={'provider':response.provider,'model':response.model,'elapsed_seconds':response.elapsed_seconds}

@@ -84,6 +84,13 @@ class ChatTests(unittest.TestCase):
         self.assertLessEqual(sum(len(m["content"].encode()) for m in output),8192)
         self.assertEqual(output[-1]["content"],"Latest")
 
+    def test_planning_guidance_covers_general_integration_and_measurable_checks(self):
+        output=build_context([],{'project':None},4096,planning=True)
+        system=output[0]['content'].lower()
+        for phrase in ('integration','testing','packaging','measurable','system ram','gpu vram','context length'):
+            self.assertIn(phrase,system)
+        self.assertNotIn('personal finance',system)
+
     def test_plan_validation(self):
         validate_plan(PLAN)
         for key,value in (("tasks",[]),("title",""),("unexpected",True)):
