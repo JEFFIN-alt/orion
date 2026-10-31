@@ -1,8 +1,6 @@
 """Provider-driven analysis; no fixture fallback or model-specific business logic."""
-from dataclasses import asdict
 from .provider import AIConfig,Provider,ProviderError,create_provider
 from .synthesis import messages,analysis_schema
-from .synthesis_schema import SCHEMA
 from .service import timestamp
 from .research import canonical
 from .models import ValidationError
@@ -15,6 +13,8 @@ def synthesize(snapshot,provider: Provider | None=None):
         'source_execution':operation['source_execution'],'evidence_digest':operation['evidence_digest'],
         'worker_version':'1','created_at':timestamp(),'configured_model':operation['model'],
         'response_metadata':None,'response_text':'','provider_error':None,'inference_uncertain':False}
+    if 'projection_digest' in operation:
+        result['projection_digest']=operation['projection_digest']
     try:
         response=provider.chat(messages(operation,snapshot['execution_id']),analysis_schema(operation))
         if not isinstance(response.content,str): raise ProviderError('Provider returned non-text analysis')

@@ -32,6 +32,7 @@ class SynthesisVerifier:
             check('artifact_digest',sha==run['artifact_digest'])
             output=strict_json(raw)
             fields={'schema_version','kind','execution_id','source_execution','evidence_digest','worker_version','created_at','configured_model','response_metadata','response_text','provider_error','inference_uncertain'}
+            if 'projection_digest' in operation: fields.add('projection_digest')
             check('envelope_schema',isinstance(output,dict) and set(output)==fields and type(output['schema_version']) is int and output['schema_version']==1 and output['kind']=='research_synthesis')
             check('execution_binding',output['execution_id']==execution_id and output['source_execution']==operation['source_execution'] and output['evidence_digest']==operation['evidence_digest'] and output['worker_version']==operation['worker_version'] and output['configured_model']==operation['model'])
             check('timestamp',isinstance(output['created_at'],str) and datetime.fromisoformat(output['created_at']).tzinfo is not None)
@@ -42,6 +43,21 @@ class SynthesisVerifier:
                 c.execute('BEGIN')
                 packet,source=select_evidence(c,self.database,operation['source_execution'])
             check('upstream_digest',source['evidence_digest']==operation['evidence_digest'])
+            if 'passages' in operation['configuration']:
+                from .passages import validate_projection
+                validate_projection(packet,operation['configuration'],operation['evidence'],operation['projection_digest'])
+                check('projection_digest',output['projection_digest']==operation['projection_digest'])
+                from .synthesis import messages
+                messages(operation,execution_id)
+                check('prompt_budget',True)
+                with self.database.connect() as c:
+                    approval=c.execute('SELECT * FROM approvals WHERE execution_id=? AND status=?',(execution_id,'approved')).fetchone()
+                check('approval_present',approval is not None)
+                approved=strict_json(approval['proposal_json'])
+                import json
+                fingerprint=hashlib.sha256(json.dumps(approved,sort_keys=True,separators=(',',':'),ensure_ascii=True).encode()).hexdigest()
+                check('approval_fingerprint',fingerprint==approval['fingerprint'])
+                check('approval_binding',approved['synthesis']==operation and approved['task_id']==execution['task_id'] and approval['task_id']==execution['task_id'] and approved['worker_id']==approval['worker_id']==execution['worker_id']=='research-synthesize')
             projection=project_evidence(packet,operation['configuration'])
             check('evidence_projection',projection==operation['evidence'])
             analysis=parse_analysis(output['response_text'],execution_id,packet['question'],operation['configuration']['max_response_bytes'])

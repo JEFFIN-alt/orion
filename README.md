@@ -332,3 +332,21 @@ Ordinary automated tests use explicitly named fixture providers and local HTTP f
 ## M10 Stage 1 — Offline intelligence evaluation
 
 Added packet-specific allowed source IDs to research synthesis output constraints and strengthened general planning guidance for dependency completeness, integration, testing, measurable acceptance criteria, and hardware resource distinctions. The offline 16-case evaluation set and results are documented in [reports/M10_OFFLINE_EVALUATION_REPORT.md](reports/M10_OFFLINE_EVALUATION_REPORT.md). The full test suite passes 121 tests. No live model inference was run in this stage.
+
+## M10 Stage 3.2 — Exact evidence passages
+
+Synthesis can select non-leading captured passages using a JSON array of
+`source_id`, `field`, `start`, and `end` objects. Offsets are zero-based Unicode
+code points with an exclusive end. `synthesis configure` accepts `--passages`;
+`synthesis preview RESEARCH_EXECUTION_ID --passages JSON_ARRAY` inspects the
+same bounded projection without creating a task or invoking a model. Evidence
+always comes from managed verified research packets, never arbitrary file paths.
+
+Source URLs, exact text, passage hashes, original evidence digests, and omitted
+ranges remain inspectable and bound to the approval. Independent verification
+re-extracts passages and checks the saved approval fingerprint. Existing leading
+excerpt configurations remain supported. Passage mode reserves output/framing
+space with a documented byte-to-token estimate; it is not an exact tokenizer.
+See [the projection report](reports/M10_STAGE3_2_EVIDENCE_PROJECTION_REPORT.md)
+for the real packet preview, tests, limits, and the separate approval required
+before any live synthesis.

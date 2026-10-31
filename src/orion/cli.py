@@ -56,7 +56,13 @@ def parser() -> argparse.ArgumentParser:
         synthesis.add_parser(action).add_argument('id')
     synthesis_config = synthesis.add_parser('configure')
     synthesis_config.add_argument('id')
+    synthesis_preview=synthesis.add_parser('preview')
+    synthesis_preview.add_argument('id',help='Verified research execution ID')
+    synthesis_preview.add_argument('--passages',type=json.loads,default=argparse.SUPPRESS)
+    for key,value in SYNTHESIS_DEFAULTS.items():
+        synthesis_preview.add_argument('--'+key.replace('_','-'),type=int,default=value)
     synthesis_config.add_argument('--source-execution',required=True)
+    synthesis_config.add_argument('--passages', type=json.loads, default=argparse.SUPPRESS, help='JSON list of source_id, field, start, end selections; no filesystem paths')
     for key,value in SYNTHESIS_DEFAULTS.items():
         synthesis_config.add_argument('--'+key.replace('_','-'),type=int,default=value)
     serve=commands.add_parser("chat")
@@ -164,7 +170,7 @@ def main(argv: list[str] | None = None) -> int:
                 from .synthesis import SynthesisService
                 synthesis = SynthesisService(db)
                 action = args.pop('action'); record_id = args.pop('id')
-                result = synthesis.configure(record_id,**args) if action=='configure' else synthesis.packet(record_id) if action=='packet' else synthesis.summary(record_id) if action=='summary' else synthesis.get(record_id)
+                result = synthesis.preview(record_id,**args) if action=='preview' else synthesis.configure(record_id,**args) if action=='configure' else synthesis.packet(record_id) if action=='packet' else synthesis.summary(record_id) if action=='summary' else synthesis.get(record_id)
             elif command == "chat":
                 from .web_chat import serve
                 serve(db,AIConfig.load(),args["port"])

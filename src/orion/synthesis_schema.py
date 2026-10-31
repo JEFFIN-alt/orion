@@ -59,7 +59,7 @@ def citations(analysis,sources):
         for sid in ids:
             if sid not in lookup: raise ValidationError(label+': unknown source ID')
             source=lookup[sid]
-            meaningful=' '.join(str(v) for k,v in source['evidence'].items() if k!='title' and v)
+            meaningful=' '.join((' '.join(p['text'] for p in v) if isinstance(v,list) else str(v)) for k,v in source['evidence'].items() if k!='title' and v)
             if len(meaningful.strip())<80: warnings.append(label+': sparse evidence for '+sid+'; interpretation needs review')
             resolved.append({'claim':label,'source_id':sid,'provider':source['provider'],'source_url':source['source_url'],
                              'evidence_digest':source['evidence_digest'],'evidence_kinds':list(source['evidence'])})
