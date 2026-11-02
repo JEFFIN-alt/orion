@@ -117,6 +117,23 @@ class FoundationTests(unittest.TestCase):
         finally:
             backup.close()
 
+    def test_online_backup_allows_healthy_previous_schema_before_migration(self):
+        with self.db.connect(write=True) as connection:
+            connection.execute('PRAGMA user_version=8')
+        destination=self.root/'schema8-backup.sqlite3'
+        result=self.cli('backup',str(destination))
+        self.assertEqual(result.returncode,0,result.stderr)
+        backup=sqlite3.connect(destination)
+        try:
+            self.assertEqual(backup.execute('PRAGMA user_version').fetchone()[0],8)
+            self.assertEqual(backup.execute('PRAGMA integrity_check').fetchone()[0],'ok')
+            self.assertIsNotNone(backup.execute('SELECT id FROM projects WHERE id=?',(self.project['id'],)).fetchone())
+        finally:
+            backup.close()
+        stale=self.cli('status')
+        self.assertEqual(stale.returncode,1)
+        self.assertIn('schema is outdated',stale.stderr)
+
     def test_online_backup_refuses_existing_destination_unchanged(self):
         destination=self.root/'already-there.sqlite3';destination.write_bytes(b'keep me')
         result=self.cli('backup',str(destination))

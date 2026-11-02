@@ -54,9 +54,12 @@ class InputService:
     def __init__(self, database):
         self.database = database
 
-    def import_csv(self, source, max_bytes=DEFAULT_LIMITS["max_bytes"]):
+    def import_csv(self, source, max_bytes=DEFAULT_LIMITS["max_bytes"], *, original_name=None):
         limits({"max_bytes": max_bytes})
         source = Path(source).expanduser().absolute()
+        stored_original_name = source.name if original_name is None else original_name
+        if not isinstance(stored_original_name, str) or not stored_original_name or len(stored_original_name) > 255 or any(ch in stored_original_name for ch in ('/', '\\', '\x00')):
+            raise ValidationError("Invalid original input filename")
         content = read_bounded(source, max_bytes)
         asset_id = str(uuid4())
         name = asset_id + ".csv"
@@ -67,7 +70,7 @@ class InputService:
             os.fsync(handle.fileno())
         # A database failure may leave an orphan; never register incomplete copies.
         with self.database.connect(write=True) as c:
-            c.execute("INSERT INTO inputs VALUES (?,?,?,?,?,?)", (asset_id, name, source.name, hashlib.sha256(content).hexdigest(), len(content), timestamp()))
+            c.execute("INSERT INTO inputs VALUES (?,?,?,?,?,?)", (asset_id, name, stored_original_name, hashlib.sha256(content).hexdigest(), len(content), timestamp()))
         return self.get(asset_id)
 
     def get(self, asset_id):

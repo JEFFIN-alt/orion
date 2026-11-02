@@ -15,6 +15,7 @@ const views = {
 };
 let currentView = 'dashboard', projectFilter = '', conversation = null, revision = 0, busy = false;
 let health = null;
+const fileLibraryState = new Map();
 const date = value => value ? new Date(value).toLocaleString() : '—';
 const badge = value => `<span class="badge ${escape(value)}">${escape(String(value || 'unknown').replaceAll('_',' '))}</span>`;
 const json = value => `<pre class="json">${escape(JSON.stringify(value,null,2))}</pre>`;
@@ -73,6 +74,92 @@ async function projects() {
   const items=await api('/api/projects');
   return `<div class="toolbar"><p>${items.length} projects in this workspace</p>${action('new-project','','New project',true)}</div>`+
     (items.length?`<div class="stack-grid">${items.map(p=>`<article class="panel project-card"><div class="toolbar">${badge(p.status)}</div><h2>${link('project',p.id,p.name)}</h2><p>${escape(p.description||'No description provided.')}</p>${projectProgress(p)}<p class="stat-foot">Created ${escape(date(p.created_at))}</p>${action('project',p.id,'Open project →')}</article>`).join('')}</div>`:panel('Projects',empty('Your first project starts here','Create a project to organize tasks and future evidence.')));
+}
+
+async function projectDetail(projectId, tab='overview') {
+  const [projects,tasks]=await Promise.all([api('/api/projects'),api('/api/tasks?project='+encodeURIComponent(projectId))]);
+  const project=projects.find(p=>p.id===projectId);if(!project)throw Error('Project not found.');
+  let body='';
+  if(tab==='overview') body=`<div class="panel-body">${badge(project.status)}<p>${escape(project.description||'No description provided.')}</p>${projectProgress(project)}<div class="details-grid">${kv('Tasks',tasks.length)}${kv('Created',date(project.created_at))}</div><div class="toolbar">${action('project-tab',projectId,'Open project files',true)}</div></div>`;
+  else if(tab==='tasks') body=tasks.length?table(['Task','Worker','State','Priority'],tasks.map(t=>`<tr><td>${link('task',t.id,t.title)}</td><td>${escape(t.worker||'Not assigned')}</td><td>${badge(t.status)}</td><td>${t.priority}</td></tr>`)):empty('No tasks yet','Add a task to this project.');
+  else if(tab==='files') body=await projectFilesContent(projectId);
+  else if(tab==='research') body=`<div class="panel-body">${link('navigate','research','Open Research Department')}<p class="hint">Research collections and evidence are inspected in the Research Department.</p></div>`;
+  else body=`<div class="panel-body">${link('navigate','executions','Open execution history')}<p class="hint">Recorded workspace events and executions are available in the existing activity views.</p></div>`;
+  const tabs=['overview','tasks','files','research','activity'];
+  openDialog(project.name,`<div class="project-tabs">${tabs.map(t=>`<button class="button ${t===tab?'primary':''}" data-action="project-tab" data-id="${escape(projectId)}" data-tab="${t}">${t==='activity'?'Activity':t[0].toUpperCase()+t.slice(1)}</button>`).join('')}</div><div class="project-section">${body}</div>`);
+  if(tab==='files') wireProjectFiles(projectId);
+}
+
+async function projectFilesContent(projectId) {
+  const state=fileLibraryState.get(projectId)||{search:'',category:'all',folder_id:'',unassigned:false,view:'grid'};fileLibraryState.set(projectId,state);
+  const query=new URLSearchParams({project_id:projectId,search:state.search,category:state.category,unassigned:String(state.unassigned)});if(state.folder_id)query.set('folder_id',state.folder_id);
+  const [files,folders]=await Promise.all([api('/api/project-files?'+query),api('/api/project-folders?project_id='+encodeURIComponent(projectId))]);
+  const viewState=fileLibraryState.get(projectId)||{search:'',category:'all',folder_id:'',unassigned:false,view:'grid'};
+  const folderOptions=`<option value="">Project root</option>${folders.map(f=>`<option value="${escape(f.id)}" ${f.id===viewState.folder_id?'selected':''}>${escape(f.name)} (${f.file_count})</option>`).join('')}`;
+  const cards=files.length?`<div id="project-file-list" class="file-grid ${state.view==='list'?'file-list':''}">${files.map(f=>fileCard(f,projectId,state.view)).join('')}</div>`:empty('No matching files','Upload files or adjust the search and filters.');
+  return `<div class="file-toolbar"><label>Search files<input id="file-search" data-project="${escape(projectId)}" type="search" maxlength="200" placeholder="Filename" value="${escape(state.search)}"></label><label>Category<select id="file-category" data-project="${escape(projectId)}"><option value="all">All files</option><option value="images" ${state.category==='images'?'selected':''}>Images</option><option value="documents" ${state.category==='documents'?'selected':''}>Documents</option><option value="data" ${state.category==='data'?'selected':''}>Data files</option><option value="development" ${state.category==='development'?'selected':''}>Development files</option><option value="archives" ${state.category==='archives'?'selected':''}>Archives</option></select></label><label>Folder<select id="file-folder" data-project="${escape(projectId)}">${folderOptions}</select></label><label class="check-label"><input id="file-unassigned" data-project="${escape(projectId)}" type="checkbox" ${state.unassigned?'checked':''}> Unassigned</label><div class="file-view-actions"><button class="button small" data-action="file-view" data-id="grid">Grid</button><button class="button small" data-action="file-view" data-id="list">List</button><button class="button small" data-action="new-folder" data-id="${escape(projectId)}">New folder</button>${state.folder_id?action('delete-folder',state.folder_id,'Delete selected folder'):''}</div></div>
+    <div id="file-drop" class="file-drop" tabindex="0"><strong>Drop files here</strong><span>or choose multiple files · up to 50 MiB each</span><div class="toolbar">${action('file-select',projectId,'Choose files',true)}${action('new-folder',projectId,'New folder')}</div><input id="project-file-input" type="file" multiple hidden accept="${Object.keys(FILE_TYPES_FOR_UI).join(',')}"></div>
+    <div id="file-progress" aria-live="polite"></div><div id="file-library-results">${cards}</div><p class="hint">Files stay in this project’s local library. Uploaded content is treated as untrusted data and is never executed or extracted.</p>`;
+}
+
+const FILE_TYPES_FOR_UI={'.png':1,'.jpg':1,'.jpeg':1,'.webp':1,'.gif':1,'.pdf':1,'.doc':1,'.docx':1,'.txt':1,'.md':1,'.rtf':1,'.csv':1,'.xls':1,'.xlsx':1,'.json':1,'.xml':1,'.py':1,'.js':1,'.html':1,'.css':1,'.sql':1,'.yaml':1,'.yml':1,'.toml':1,'.zip':1};
+function fileCard(file,projectId,view='grid') {
+  const category=file.extension.match(/^\.(png|jpe?g|webp|gif)$/)?'image':file.extension==='.zip'?'archive':(['.csv','.xls','.xlsx','.json','.xml'].includes(file.extension)?'data':(['.py','.js','.html','.css','.sql','.yaml','.yml','.toml'].includes(file.extension)?'development':'document'));
+  const preview=category==='image'&&file.status==='active'?`<img class="file-thumb" loading="lazy" src="/api/project-file-preview?project_id=${encodeURIComponent(projectId)}&id=${encodeURIComponent(file.id)}" alt="Preview of ${escape(file.display_name)}">`:`<div class="file-icon" aria-hidden="true">${escape(file.extension.slice(1).toUpperCase())}</div>`;
+  return `<article class="file-card ${view==='list'?'file-row':''}">${preview}<div class="file-card-main"><button class="link-button file-name" data-action="file-detail" data-id="${escape(file.id)}" data-project="${escape(projectId)}">${escape(file.display_name)}</button><small>${escape(file.detected_mime)} · ${formatBytes(file.size)} · ${escape(date(file.uploaded_at))}</small><small>${file.tasks?.length?`Task: ${escape(file.tasks.map(t=>t.title).join(', '))}`:'Unassigned'} · ${escape(file.import_status.replaceAll('_',' '))} · ${escape(file.status)}</small></div><button class="button small" data-action="file-detail" data-id="${escape(file.id)}" data-project="${escape(projectId)}">Details</button></article>`;
+}
+function formatBytes(value) { if(value<1024)return value+' B';if(value<1024*1024)return (value/1024).toFixed(1)+' KiB';return (value/1024/1024).toFixed(1)+' MiB'; }
+function wireProjectFiles(projectId) {
+  const input=$('project-file-input'),drop=$('file-drop');
+  if(!input||!drop)return;
+  input.addEventListener('change',()=>uploadProjectFiles(projectId,[...input.files]));
+  drop.addEventListener('dragover',event=>{event.preventDefault();drop.classList.add('dragging');});
+  drop.addEventListener('dragleave',()=>drop.classList.remove('dragging'));
+  drop.addEventListener('drop',event=>{event.preventDefault();drop.classList.remove('dragging');uploadProjectFiles(projectId,[...event.dataTransfer.files]);});
+  drop.addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();input.click();}});
+}
+function uploadProjectFiles(projectId,files) {
+  if(!files.length)return;
+  const state=fileLibraryState.get(projectId)||{search:'',category:'all',folder_id:'',unassigned:false,view:'grid'};
+  const queue=async()=>{
+    for(const file of files) {
+      if(file.size>50*1024*1024){notice(`${file.name}: exceeds the 50 MiB per-file limit.`,true);continue;}
+      $('file-progress').innerHTML=`<div class="upload-status"><span>${escape(file.name)}</span><progress id="upload-progress" max="100" value="0"></progress><span id="upload-percent">0%</span></div>`;
+      try {
+        const result=await new Promise((resolve,reject)=>{
+          const xhr=new XMLHttpRequest();
+          xhr.open('POST','/api/project-files?project_id='+encodeURIComponent(projectId));
+          xhr.setRequestHeader('Content-Type','application/octet-stream');xhr.setRequestHeader('X-Orion-Token',token);
+          xhr.setRequestHeader('X-Orion-Request',crypto.randomUUID());xhr.setRequestHeader('X-Orion-Filename',encodeURIComponent(file.name));
+          if(state.folder_id)xhr.setRequestHeader('X-Orion-Folder',encodeURIComponent(state.folder_id));
+          xhr.upload.onprogress=e=>{if(e.lengthComputable){const percent=Math.floor(100*e.loaded/e.total);if($('upload-progress'))$('upload-progress').value=percent;if($('upload-percent'))$('upload-percent').textContent=percent+'%';}};
+          xhr.onerror=()=>reject(Error('Upload connection failed.'));
+          xhr.onload=()=>{let body;try{body=JSON.parse(xhr.responseText);}catch{reject(Error('Server returned an invalid upload response.'));return;}if(xhr.status<200||xhr.status>=300)reject(Error(body.error||'Upload failed.'));else resolve(body);};
+          xhr.send(file);
+        });
+        notice(result.duplicate?`${file.name}: duplicate content already exists as ${result.file.display_name}; no second copy was stored.`:`Uploaded ${file.name}.`);
+      } catch(error) { notice(`${file.name}: ${error.message}`,true); }
+    }
+    await projectDetail(projectId,'files');
+  };
+  queue();
+}
+async function fileDetail(projectId,fileId) {
+  const [f,tasks,folders]=await Promise.all([api('/api/project-file?project_id='+encodeURIComponent(projectId)+'&id='+encodeURIComponent(fileId)),api('/api/tasks?project='+encodeURIComponent(projectId)),api('/api/project-folders?project_id='+encodeURIComponent(projectId))]);
+  let preview='';
+  if(f.status==='active'&&/^image\//.test(f.detected_mime)) preview=`<img class="preview-image" src="/api/project-file-preview?project_id=${encodeURIComponent(projectId)}&id=${encodeURIComponent(fileId)}" alt="${escape(f.display_name)}">`;
+  else if(f.status==='active'&&['.txt','.md','.rtf','.csv','.json','.xml','.py','.js','.html','.css','.sql','.yaml','.yml','.toml'].includes(f.extension)) {
+    const response=await fetch('/api/project-file-preview?project_id='+encodeURIComponent(projectId)+'&id='+encodeURIComponent(fileId));
+    if(response.ok){const truncated=response.headers.get('X-Orion-Preview-Truncated')==='true';preview=`<h3>Text preview</h3>${truncated?'<p class="notice">Preview shows the first 512 KiB. Download the file for the complete content.</p>':''}<pre class="json file-preview-text">${escape(await response.text())}</pre>`;}
+  }
+  const folderOptions=`<option value="">Project root</option>${folders.map(x=>`<option value="${escape(x.id)}" ${x.id===f.folder_id?'selected':''}>${escape(x.name)}</option>`).join('')}`;
+  const taskOptions=tasks.map(t=>`<option value="${escape(t.id)}" ${f.tasks?.some(x=>x.id===t.id)?'disabled':''}>${escape(t.title)} · ${escape(t.status)}</option>`).join('');
+  const associations=f.tasks?.length?f.tasks.map(t=>`<li>${escape(t.title)}</li>`).join(''):'<li>Unassigned</li>';
+  const controls=f.status==='active'?`<form id="file-edit-form" data-project="${escape(projectId)}" data-file="${escape(fileId)}"><div class="form-grid"><label>Display name<input name="display_name" maxlength="255" value="${escape(f.display_name)}" required></label><label>Folder<select name="folder_id">${folderOptions}</select></label></div><label>Description<textarea name="description" maxlength="4000">${escape(f.description)}</textarea></label><button class="button" type="submit">Save file details</button></form>
+    <form id="file-attach-form" data-project="${escape(projectId)}" data-file="${escape(fileId)}"><label>Attach to task<select name="task_id" required><option value="">Choose a project task</option>${taskOptions}</select></label><button class="button" type="submit">Attach file</button></form>
+    ${f.extension==='.csv'?`<form id="csv-connect-form" data-project="${escape(projectId)}" data-file="${escape(fileId)}"><label>Select task for CSV analysis<select name="task_id" required><option value="">Choose pending project task</option>${tasks.filter(t=>t.status==='pending').map(t=>`<option value="${escape(t.id)}">${escape(t.title)}</option>`).join('')}</select></label><button class="button" type="submit">Connect as CSV worker input</button><p class="hint">Uses the existing 10 MiB CSV input limit and deduplicates by verified SHA-256.</p></form>`:''}
+    <div class="toolbar"><a class="button" href="/api/project-file-download?project_id=${encodeURIComponent(projectId)}&id=${encodeURIComponent(fileId)}">Download</a><button class="button danger" data-action="file-delete" data-id="${escape(fileId)}" data-project="${escape(projectId)}">Delete file</button></div>`:`<div class="notice error">This file is quarantined and cannot be previewed, downloaded or attached. Retry deletion to finish local cleanup.</div><button class="button danger" data-action="file-delete" data-id="${escape(fileId)}" data-project="${escape(projectId)}">Retry deletion</button>`;
+  openDialog(f.display_name,`${preview}<div class="details-grid">${kv('File type',f.extension+' · '+f.detected_mime)}${kv('Size',formatBytes(f.size))}${kv('Status',f.status)}${kv('Uploaded',date(f.uploaded_at))}${kv('Uploaded by',f.uploaded_by)}${kv('SHA-256',f.sha256)}${kv('Storage path',f.storage_relative_path)}${kv('CSV import',f.import_status)}</div><h3>Associated tasks</h3><ul>${associations}</ul>${controls}`);
 }
 async function tasks() {
   const [items,projects]=await Promise.all([api('/api/tasks'+(projectFilter?'?project='+encodeURIComponent(projectFilter):'')),api('/api/projects')]);
@@ -149,10 +236,13 @@ async function taskDetail(id) {
   const steps=l.events.filter(e=>timeline[e.type]);
   const assignmentForm=editable?`<form id="worker-form" data-id="${escape(id)}"><label>Registered worker<select name="worker_id" required><option value="">Choose a suitable worker</option>${catalog.map(w=>`<option value="${escape(w.identifier)}" ${w.identifier===assigned?.worker_id?'selected':''}>${escape(w.name)} · ${escape(w.identifier)} · v${escape(w.version)}</option>`).join('')}</select></label><p class="hint">Choose by the worker's actual capabilities. Project status produces a record summary; it cannot test a browser or build software.</p><button class="button" type="submit">Assign worker</button></form>`:'';
   const configForm=editable&&assigned?`<form id="worker-config-form" data-id="${escape(id)}" data-assignment="${escape(assigned.event_id)}"><label>Supported configuration (JSON)<textarea name="configuration" class="configuration-input" rows="10" required>${escape(JSON.stringify(configured,null,2))}</textarea></label><p class="hint">${escape(worker.configuration_help)}</p><details><summary>Exact supported defaults and bounds</summary>${json({defaults:worker.defaults,bounds:worker.bounds})}</details>${worker.identifier==='csv-profile'?action('managed-inputs','','Inspect imported CSV input IDs'):''}<button class="button" type="submit">Save configuration</button></form>`:'';
+  const attachments=d.files.length?d.files.map(f=>`<article class="plan-card"><button class="link-button" data-action="file-detail" data-id="${escape(f.id)}" data-project="${escape(d.task.project_id)}">${escape(f.display_name)}</button><p>${escape(f.detected_mime)} · ${formatBytes(f.size)} · SHA-256 ${escape(f.sha256)}</p><button class="button small danger" data-action="detach-file" data-id="${escape(f.id)}" data-project="${escape(d.task.project_id)}" data-task="${escape(id)}">Remove task attachment</button></article>`).join(''):'<p class="muted">No project files attached.</p>';
+  const fileHistory=d.file_history?.length?`<details><summary>Attachment history</summary><ul>${d.file_history.map(f=>`<li>${escape(f.display_name)} · ${escape(f.status)} · attached ${escape(date(f.attached_at))}${f.removed_at?' · removed '+escape(date(f.removed_at)):''}</li>`).join('')}</ul></details>`:'';
   openDialog(d.task.title,`<h2>Overview</h2><p>${escape(d.task.description||'No description provided.')}</p><div class="details-grid">${kv('Task state',d.task.status)}${kv('Scheduling classification',d.dependency.classification)}${kv('Priority',d.task.priority)}${kv('Approval required',d.dependency.approval_required?'Yes':'No')}</div>
     <details open><summary>Assigned worker</summary>${assigned?`${kv('Binding',assigned.worker_id+' · v'+assigned.version)}${kv('Assigned',date(assigned.assigned_at))}${json(worker)}`:'<p class="muted">No explicit worker assignment.</p>'}${assignmentForm}<details><summary>Compare registered operations and requirements</summary>${json(catalog)}</details></details>
     <details open><summary>Dependencies</summary><p class="hint">${escape(d.dependency.reason)}</p>${deps.length?json(deps):'<p class="muted">No prerequisites recorded.</p>'}</details>
     <details open><summary>Configuration</summary>${configForm||(l.assignment?json(l.configuration):'<p class="muted">Configuration becomes available after worker assignment.</p>')}${l.configuration_error?`<p class="notice">${escape(l.configuration_error)}</p>`:''}</details>
+    <details open><summary>Project file attachments</summary>${attachments}${fileHistory}${action('project-files',d.task.project_id,'Browse project files')}</details>
     <p class="notice">${escape(l.execution_gate)}</p><div class="toolbar">${editable&&assigned?action('task-preview',id,'Preview execution proposal',true):''}${l.can_execute?action('task-execute-confirm',id,'Review approved execution'):''}</div>
     <details open><summary>Approval history</summary>${l.approvals.length?l.approvals.map(a=>`<p>${link('approval',a.id,a.id)} ${badge(a.execution_id?'consumed':a.status)} · ${escape(a.worker_id)}</p>`).join(''):'<p class="muted">No requests recorded.</p>'}</details>
     <details open><summary>Execution history, output and verification</summary>${d.history.length?d.history.map(x=>`<article class="plan-card">${link('execution',x.id,'Attempt '+x.attempt+' · '+x.id)} ${badge(x.status)}<p>${escape(x.summary||'Execution in progress')}</p>${x.result?.artifact?action('artifact',x.id,'Inspect output artifact'):''}${x.latest_verification?kv('Independent verification',x.latest_verification.status):''}</article>`).join(''):'<p class="muted">No attempts recorded.</p>'}</details>
@@ -201,9 +291,18 @@ async function createForm(kind) {
   openDialog('New '+kind,`<form id="create-form" data-kind="${kind}">${fields}<label>Description<textarea name="description" maxlength="4000"></textarea></label><p class="hint">${kind==='task'?'The task will require execution approval. A worker is bound through a supported configuration or execution proposal.':'Create a persistent project in the current local database.'}</p><button class="button primary" type="submit">Create ${kind}</button></form>`);
 }
 
-async function handle(name,id) {
+async function handle(name,id,extra={}) {
   if (name==='navigate') return navigate(id);
-  if (name==='project') {projectFilter=id;return navigate('tasks');}
+  if (name==='project') return projectDetail(id);
+  if (name==='project-tab') return projectDetail(id,extra.tab||'files');
+  if (name==='project-files') return projectDetail(id,'files');
+  if (name==='file-select') { $('project-file-input')?.click(); return; }
+  if (name==='file-detail') return fileDetail(extra.project||extra.dataset?.project||'',id);
+  if (name==='file-view') { const project=$('file-search')?.dataset.project;if(!project)return;const state=fileLibraryState.get(project)||{};state.view=id;fileLibraryState.set(project,state);return projectDetail(project,'files'); }
+  if (name==='new-folder') {openDialog('Create project folder',`<form id="folder-form" data-project="${escape(id)}"><label>Folder name<input name="name" maxlength="100" required></label><button class="button primary" type="submit">Create folder</button></form>`);return;}
+  if (name==='delete-folder') {const project=$('file-folder')?.dataset.project;if(!window.confirm('Delete this empty project folder?'))return;await api('/api/project-folder-delete',{project_id:project,folder_id:id});const state=fileLibraryState.get(project);if(state)state.folder_id='';return projectDetail(project,'files');}
+  if (name==='file-delete') {if(!window.confirm('Delete this project file? Active task links will be detached. Historical CSV inputs used by prior executions are preserved.'))return;await api('/api/project-file-delete',{project_id:extra.project,file_id:id,confirm:id});return projectDetail(extra.project,'files');}
+  if (name==='detach-file') {if(!window.confirm('Remove this file from the task? The project file will remain in its library.'))return;await api('/api/task-file-detach',{project_id:extra.project,file_id:id,task_id:extra.task});return taskDetail(extra.task);}
   if (name==='task') return taskDetail(id);
   if (name==='execution') return executionDetail(id);
   if (name==='evidence') return evidenceDetail(id);
@@ -262,10 +361,10 @@ async function guarded(work) {
 }
 document.addEventListener('click',event=>{
   const target=event.target.closest('[data-action]');
-  if(target)guarded(()=>handle(target.dataset.action,target.dataset.id));
+  if(target)guarded(()=>handle(target.dataset.action,target.dataset.id,target.dataset));
 });
 document.addEventListener('submit',event=>{
-  if(!['create-form','plan-form','worker-form','worker-config-form','task-proposal-form'].includes(event.target.id))return;
+  if(!['create-form','plan-form','worker-form','worker-config-form','task-proposal-form','file-edit-form','file-attach-form','csv-connect-form','folder-form'].includes(event.target.id))return;
   event.preventDefault();
   const form=event.target;const data=Object.fromEntries(new FormData(form));
   guarded(async()=>{
@@ -282,6 +381,23 @@ document.addEventListener('submit',event=>{
       const a=await api('/api/task-approval',{preview_token:form.dataset.preview,reason:data.reason});
       await approvalDetail(a.id);return;
     }
+    if(form.id==='file-edit-form') {
+      await api('/api/project-file-update',{project_id:form.dataset.project,file_id:form.dataset.file,display_name:data.display_name,description:data.description,folder_id:data.folder_id||null,move:true});
+      return fileDetail(form.dataset.project,form.dataset.file);
+    }
+    if(form.id==='file-attach-form') {
+      await api('/api/task-file-attach',{project_id:form.dataset.project,file_id:form.dataset.file,task_id:data.task_id});
+      return fileDetail(form.dataset.project,form.dataset.file);
+    }
+    if(form.id==='csv-connect-form') {
+      const result=await api('/api/project-file-csv-bind',{project_id:form.dataset.project,file_id:form.dataset.file,task_id:data.task_id});
+      notice(`CSV input connected to task. Input ${result.input_id}; SHA-256 ${result.sha256}. Execution still requires review and approval.`);
+      return fileDetail(form.dataset.project,form.dataset.file);
+    }
+    if(form.id==='folder-form') {
+      await api('/api/project-folders',{project_id:form.dataset.project,name:data.name});
+      return projectDetail(form.dataset.project,'files');
+    }
     if(form.id==='plan-form') await api('/api/decision',{...data,id:form.dataset.id,fingerprint:form.dataset.fingerprint});
     else {
       const kind=form.dataset.kind;
@@ -295,6 +411,19 @@ document.addEventListener('submit',event=>{
 document.addEventListener('change',event=>{
   if(event.target.id==='task-project'){projectFilter=event.target.value;render();}
   if(event.target.id==='conversation-select'){conversation=event.target.value||null;render();}
+  if(['file-category','file-folder','file-unassigned'].includes(event.target.id)) {
+    const project=event.target.dataset.project;const state=fileLibraryState.get(project)||{search:'',category:'all',folder_id:'',unassigned:false,view:'grid'};
+    if(event.target.id==='file-category')state.category=event.target.value;
+    if(event.target.id==='file-folder')state.folder_id=event.target.value;
+    if(event.target.id==='file-unassigned')state.unassigned=event.target.checked;
+    fileLibraryState.set(project,state);guarded(()=>projectDetail(project,'files'));
+  }
+});
+let fileSearchTimer;
+document.addEventListener('input',event=>{
+  if(event.target.id==='file-search') {
+    clearTimeout(fileSearchTimer);fileSearchTimer=setTimeout(()=>{const project=event.target.dataset.project;const state=fileLibraryState.get(project)||{category:'all',folder_id:'',unassigned:false,view:'grid'};state.search=event.target.value;fileLibraryState.set(project,state);guarded(()=>projectDetail(project,'files'));},250);
+  }
 });
 $('close-dialog').onclick=()=>$('dialog').close();
 $('menu').onclick=()=>{const open=$('sidebar').classList.toggle('open');$('menu').setAttribute('aria-expanded',String(open));};

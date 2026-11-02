@@ -288,7 +288,7 @@ class ResearchIntegrationTests(unittest.TestCase):
         old.initialize();old.initialize()
         with old.connect() as c:
             for table,rows in before.items(): self.assertEqual([tuple(r) for r in c.execute('SELECT * FROM '+table)],rows)
-        self.assertEqual(old.health()['schema_version'],8)
+        self.assertEqual(old.health()['schema_version'],9)
 
 
     def test_empty_successful_search_is_not_a_finding(self):

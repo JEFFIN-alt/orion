@@ -13,6 +13,7 @@ from .verification import VerificationService
 from .workers import REGISTRY, resolve
 from .task_lifecycle import TaskLifecycle
 from .task_workers import binding
+from .project_files import ProjectFileService
 
 
 class ControlRoom:
@@ -64,7 +65,9 @@ class ControlRoom:
         task = self.service.get('tasks', task_id)
         return {'task': task, 'dependency': DependencyService(self.database).explain(task_id),
                 'history': ExecutionService(self.database).history(task_id),
-                'lifecycle': TaskLifecycle(self.database).state(task_id)}
+                'lifecycle': TaskLifecycle(self.database).state(task_id),
+                'files': ProjectFileService(self.database).task_attachments(task_id),
+                'file_history': ProjectFileService(self.database).task_attachment_history(task_id)}
 
     def executions(self):
         with self.database.connect() as c:

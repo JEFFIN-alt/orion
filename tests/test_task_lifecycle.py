@@ -56,7 +56,7 @@ class TaskLifecycleTests(unittest.TestCase):
         self.assertEqual(self.assign(task)['event_id'],assigned['event_id'])
         self.assertEqual(self.get('/api/tasks')[-1]['worker'],'project-status')
         self.assertEqual(self.get('/api/task?id='+task['id'])['lifecycle']['assignment']['event_id'],assigned['event_id'])
-        with self.db.connect() as c:self.assertEqual(c.execute('PRAGMA user_version').fetchone()[0],8)
+        with self.db.connect() as c:self.assertEqual(c.execute('PRAGMA user_version').fetchone()[0],9)
 
     def test_configuration_rejects_extra_fields_and_changed_assignment(self):
         task=self.task();assigned=self.assign(task)

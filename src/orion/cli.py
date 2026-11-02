@@ -153,16 +153,20 @@ def main(argv: list[str] | None = None) -> int:
             if not config.database.is_file():
                 raise ValidationError("Database does not exist; run init first")
             health = db.health()
-            if health["schema_version"] != 8 or health["integrity"] != "ok" or health["foreign_key_errors"]:
+            if (health["schema_version"] not in range(0, 10) or health["integrity"] != "ok"
+                    or health["foreign_key_errors"]):
                 raise ValidationError(f"Database is not healthy: {health}")
-            if command in ("dependencies","queue"):
+            if command == 'backup':
+                result={'backup':db.backup(args['path'])}
+            elif health["schema_version"] != 9:
+                raise ValidationError(f"Database schema is outdated; run init first: {health}")
+            elif command in ("dependencies","queue"):
                 dependencies = DependencyService(db)
                 if args["action"] == "add": result = dependencies.add(args["id"],args["prerequisite"])
                 elif args["action"] in ("show","explain"): result = dependencies.explain(args["id"])
                 else:
                     result = dependencies.project(args["project"])
                     if args.get("state"): result["tasks"] = [t for t in result["tasks"] if t["classification"]==args["state"]]
-            elif command == 'backup': result={'backup':db.backup(args['path'])}
             elif command == 'research':
                 research = ResearchService(db)
                 action = args.pop('action')

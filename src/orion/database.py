@@ -130,6 +130,64 @@ MIGRATION_8 = (
     "CREATE TRIGGER synthesis_runs_no_delete BEFORE DELETE ON synthesis_runs BEGIN SELECT RAISE(ABORT,'Synthesis binding is immutable'); END",
 )
 
+MIGRATION_9 = (
+    """CREATE TABLE project_file_folders (
+      id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
+      name TEXT NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 100), created_at TEXT NOT NULL,
+      UNIQUE(project_id,name))""",
+    """CREATE TABLE project_files (
+      id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
+      folder_id TEXT REFERENCES project_file_folders(id), original_name TEXT NOT NULL,
+      display_name TEXT NOT NULL, stored_name TEXT NOT NULL, storage_relative_path TEXT NOT NULL UNIQUE,
+      extension TEXT NOT NULL, detected_mime TEXT NOT NULL, mime_detection TEXT NOT NULL,
+      size INTEGER NOT NULL CHECK(size>=0), sha256 TEXT NOT NULL, uploaded_at TEXT NOT NULL,
+      uploaded_by TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL CHECK(status IN ('active','deleted','quarantined')),
+      csv_input_id TEXT REFERENCES inputs(id), import_status TEXT NOT NULL
+        CHECK(import_status IN ('not_applicable','not_imported','imported')),
+      UNIQUE(project_id,id))""",
+    "CREATE UNIQUE INDEX project_file_content_unique ON project_files(project_id,sha256) WHERE status='active'",
+    "CREATE INDEX project_files_project_idx ON project_files(project_id,status,uploaded_at)",
+    """CREATE TABLE project_file_tasks (
+      id TEXT PRIMARY KEY, file_id TEXT NOT NULL REFERENCES project_files(id),
+      task_id TEXT NOT NULL REFERENCES tasks(id), attached_at TEXT NOT NULL, removed_at TEXT)""",
+    "CREATE UNIQUE INDEX project_file_task_active ON project_file_tasks(file_id,task_id) WHERE removed_at IS NULL",
+    "CREATE INDEX project_file_tasks_task_idx ON project_file_tasks(task_id,removed_at)",
+    """CREATE TRIGGER project_file_task_history_guard BEFORE UPDATE ON project_file_tasks
+      WHEN NEW.id!=OLD.id OR NEW.file_id!=OLD.file_id OR NEW.task_id!=OLD.task_id OR NEW.attached_at!=OLD.attached_at
+        OR OLD.removed_at IS NOT NULL OR NEW.removed_at IS NULL
+      BEGIN SELECT RAISE(ABORT,'Task file attachment history is immutable'); END""",
+    "CREATE TRIGGER project_file_task_history_no_delete BEFORE DELETE ON project_file_tasks BEGIN SELECT RAISE(ABORT,'Task file attachment history is immutable'); END",
+    """CREATE TRIGGER project_file_folder_scope BEFORE INSERT ON project_files
+      WHEN NEW.folder_id IS NOT NULL BEGIN
+        SELECT CASE WHEN (SELECT project_id FROM project_file_folders WHERE id=NEW.folder_id) != NEW.project_id
+          THEN RAISE(ABORT,'File folder belongs to another project') END;
+      END""",
+    """CREATE TRIGGER project_file_folder_scope_update BEFORE UPDATE OF folder_id,project_id ON project_files
+      WHEN NEW.folder_id IS NOT NULL BEGIN
+        SELECT CASE WHEN (SELECT project_id FROM project_file_folders WHERE id=NEW.folder_id) != NEW.project_id
+          THEN RAISE(ABORT,'File folder belongs to another project') END;
+      END""",
+    """CREATE TRIGGER project_file_task_scope BEFORE INSERT ON project_file_tasks BEGIN
+      SELECT CASE WHEN (SELECT project_id FROM project_files WHERE id=NEW.file_id) !=
+        (SELECT project_id FROM tasks WHERE id=NEW.task_id)
+        THEN RAISE(ABORT,'File and task belong to different projects') END;
+      SELECT CASE WHEN (SELECT status FROM project_files WHERE id=NEW.file_id) != 'active'
+        THEN RAISE(ABORT,'File is not active') END;
+      END""",
+    """CREATE TABLE project_file_events (
+      id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
+      file_id TEXT REFERENCES project_files(id), event_type TEXT NOT NULL,
+      details_json TEXT NOT NULL, created_at TEXT NOT NULL)""",
+    "CREATE TRIGGER project_file_events_no_update BEFORE UPDATE ON project_file_events BEGIN SELECT RAISE(ABORT,'Project file events are append-only'); END",
+    "CREATE TRIGGER project_file_events_no_delete BEFORE DELETE ON project_file_events BEGIN SELECT RAISE(ABORT,'Project file events are append-only'); END",
+    """CREATE TRIGGER project_file_event_scope BEFORE INSERT ON project_file_events
+      WHEN NEW.file_id IS NOT NULL BEGIN
+        SELECT CASE WHEN (SELECT project_id FROM project_files WHERE id=NEW.file_id)!=NEW.project_id
+          THEN RAISE(ABORT,'File event belongs to another project') END;
+      END""",
+)
+
 
 class Database:
     def __init__(self, path: Path):
@@ -213,7 +271,7 @@ class Database:
     def initialize(self) -> None:
         with self.connect(write=True) as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2, 3, 4, 5, 6, 7, 8):
+            if version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9):
                 raise RuntimeError(f"Unsupported database schema version: {version}")
             if version == 0:
                 for statement in SCHEMA:
@@ -249,6 +307,11 @@ class Database:
                 for statement in MIGRATION_8:
                     connection.execute(statement)
                 connection.execute("PRAGMA user_version = 8")
+
+            if version < 9:
+                for statement in MIGRATION_9:
+                    connection.execute(statement)
+                connection.execute("PRAGMA user_version = 9")
 
     def health(self) -> dict:
         with self.connect() as connection:

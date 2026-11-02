@@ -8,7 +8,7 @@ import time
 import hashlib
 import logging
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlsplit,parse_qs
+from urllib.parse import urlsplit,parse_qs,unquote,quote
 from pathlib import Path
 from .conversations import ConversationService
 from .plans import PlanService
@@ -19,6 +19,7 @@ from .approvals import ApprovalService
 from .task_lifecycle import TaskLifecycle
 from .task_workers import TaskWorkers
 from .inputs import InputService
+from .project_files import ProjectFileService, MAX_FILE_BYTES, FILE_TYPES, TEXT_EXTENSIONS
 
 logger=logging.getLogger('orion.web')
 
@@ -52,6 +53,20 @@ def make_server(database,config,port=8765,provider=None):
             self.end_headers()
             try: self.wfile.write(data)
             except OSError: pass
+        def file_reply(self,status,data,filename,content_type,disposition,extra_headers=()):
+            safe_ascii=''.join(c if 32<=ord(c)<127 and c not in '"\\;' else '_' for c in filename)[:120] or 'download'
+            self.send_response(status)
+            self.send_header('Content-Type',content_type)
+            self.send_header('Content-Length',str(len(data)))
+            self.send_header('Content-Disposition',f"{disposition}; filename=\"{safe_ascii}\"; filename*=UTF-8''{quote(filename,safe='')}")
+            self.send_header('Cache-Control','no-store')
+            self.send_header('X-Content-Type-Options','nosniff')
+            self.send_header('Content-Security-Policy',"default-src 'none'; sandbox; frame-ancestors 'none'; base-uri 'none'")
+            self.send_header('Referrer-Policy','no-referrer')
+            for name,value in extra_headers: self.send_header(name,value)
+            self.end_headers()
+            try: self.wfile.write(data)
+            except OSError: pass
         def allowed(self):
             return self.headers.get("Host")==f"127.0.0.1:{self.server.server_port}"
         def do_GET(self):
@@ -77,6 +92,26 @@ def make_server(database,config,port=8765,provider=None):
                 elif parsed.path=='/api/workers': result=room.workers()
                 elif parsed.path=='/api/worker-catalog': result=lifecycle.catalog()
                 elif parsed.path=='/api/inputs': result=InputService(database).list()
+                elif parsed.path=='/api/project-files':
+                    result=ProjectFileService(database).list(query.get('project_id',[''])[0],
+                        search=query.get('search',[''])[0],category=query.get('category',['all'])[0],
+                        folder_id=query.get('folder_id',[None])[0],unassigned=query.get('unassigned',['false'])[0]=='true')
+                elif parsed.path=='/api/project-folders': result=ProjectFileService(database).folders(query.get('project_id',[''])[0])
+                elif parsed.path=='/api/project-file': result=ProjectFileService(database).get(query.get('project_id',[''])[0],record_id)
+                elif parsed.path in ('/api/project-file-download','/api/project-file-preview'):
+                    files=ProjectFileService(database)
+                    record,content=files.read(query.get('project_id',[''])[0],record_id)
+                    if parsed.path.endswith('preview'):
+                        category=FILE_TYPES[record['extension']][0]
+                        if category=='image':
+                            return self.file_reply(200,content,record['display_name'],record['detected_mime'],'inline')
+                        if record['extension'] not in TEXT_EXTENSIONS:
+                            raise ValidationError('This file type is download-only')
+                        preview=content[:512*1024].decode('utf-8-sig')
+                        self.file_reply(200,preview.encode('utf-8'),record['display_name'],'text/plain; charset=utf-8','inline',
+                            (('X-Orion-Preview-Truncated','true' if len(content)>512*1024 else 'false'),))
+                        return
+                    return self.file_reply(200,content,record['display_name'],'application/octet-stream','attachment')
                 elif parsed.path=='/api/artifact': result=lifecycle.artifact(record_id)
                 elif parsed.path=='/api/task-preview':
                     result=lifecycle.preview(record_id)
@@ -118,6 +153,20 @@ def make_server(database,config,port=8765,provider=None):
             request_id=self.headers.get('X-Orion-Request')
             claimed=False
             try:
+                parsed=urlsplit(self.path)
+                if parsed.path=='/api/project-files':
+                    if self.headers.get('Content-Type','').split(';',1)[0].strip().lower()!='application/octet-stream':
+                        raise ValidationError('File uploads must use application/octet-stream')
+                    try: length=int(self.headers.get('Content-Length','0'))
+                    except ValueError: raise ValidationError('Invalid upload size') from None
+                    if not 0<length<=MAX_FILE_BYTES: raise ValidationError(f'File size must be 1..{MAX_FILE_BYTES} bytes')
+                    request_id=self.headers.get('X-Orion-Request','')
+                    if not request_id or len(request_id)>100: raise ValidationError('Upload request identifier required')
+                    filename=unquote(self.headers.get('X-Orion-Filename',''),errors='strict')
+                    folder=unquote(self.headers.get('X-Orion-Folder',''),errors='strict') or None
+                    result=ProjectFileService(database).upload_stream(parse_qs(parsed.query).get('project_id',[''])[0],filename,self.rfile,length,folder_id=folder)
+                    self.reply(200,result)
+                    return
                 length=int(self.headers.get("Content-Length","0"))
                 if not 0<length<=20000: raise ValidationError("Invalid request size")
                 body=json.loads(self.rfile.read(length))
@@ -153,6 +202,48 @@ def make_server(database,config,port=8765,provider=None):
                 elif self.path=='/api/task-configuration':
                     if set(body)!={'id','assignment_id','configuration'}: raise ValidationError('Task, assignment and configuration required')
                     result=lifecycle.configure(body['id'],body['assignment_id'],body['configuration'])
+                elif self.path=='/api/project-folders':
+                    if set(body)!={'project_id','name'}: raise ValidationError('Project ID and folder name required')
+                    result=ProjectFileService(database).create_folder(body['project_id'],body['name'])
+                elif self.path=='/api/project-folder-delete':
+                    if set(body)!={'project_id','folder_id'}: raise ValidationError('Project and folder IDs required')
+                    result=ProjectFileService(database).delete_folder(body['project_id'],body['folder_id'])
+                elif self.path=='/api/project-file-update':
+                    if set(body)-{'project_id','file_id','display_name','description','folder_id','move'} or not {'project_id','file_id'}<=set(body):
+                        raise ValidationError('Project/file IDs and supported metadata fields required')
+                    result=ProjectFileService(database).update(body['project_id'],body['file_id'],
+                        display_name=body.get('display_name'),description=body.get('description'),
+                        folder_id=body.get('folder_id'),move=body.get('move') is True)
+                elif self.path=='/api/task-file-attach':
+                    if set(body)!={'project_id','file_id','task_id'}: raise ValidationError('Project, file and task IDs required')
+                    result=ProjectFileService(database).attach(body['project_id'],body['file_id'],body['task_id'])
+                elif self.path=='/api/task-file-detach':
+                    if set(body)!={'project_id','file_id','task_id'}: raise ValidationError('Project, file and task IDs required')
+                    result=ProjectFileService(database).detach(body['project_id'],body['file_id'],body['task_id'])
+                elif self.path=='/api/project-file-csv-bind':
+                    if set(body)!={'project_id','file_id','task_id'}: raise ValidationError('Project, CSV file and task IDs required')
+                    files=ProjectFileService(database)
+                    task=room.service.get('tasks',body['task_id'])
+                    if task['project_id']!=body['project_id']: raise ValidationError('Task belongs to another project')
+                    if task['status']!='pending': raise ValidationError('CSV worker inputs can only be bound to pending tasks')
+                    existing=files.get(body['project_id'],body['file_id'])
+                    if existing['extension']!='.csv': raise ValidationError('Only CSV files can be connected to csv-profile')
+                    with database.connect() as c:
+                        assignment=c.execute("SELECT details_json FROM events WHERE task_id=? AND type='worker_assigned' ORDER BY rowid DESC LIMIT 1",(task['id'],)).fetchone()
+                        configured=c.execute('SELECT limits_json FROM csv_operations WHERE task_id=?',(task['id'],)).fetchone()
+                    if assignment:
+                        assigned=json.loads(assignment['details_json']).get('worker_id')
+                        if assigned!='csv-profile': raise ValidationError('Task is assigned to a different worker; reassign it before selecting a CSV')
+                    asset=files.ensure_csv_input(body['project_id'],body['file_id'])
+                    files.attach(body['project_id'],body['file_id'],body['task_id'])
+                    settings=json.loads(configured['limits_json']) if configured else {}
+                    operation=InputService(database).bind(body['task_id'],asset['id'],**settings)
+                    TaskWorkers(database).assign(body['task_id'],'csv-profile')
+                    result={'file_id':body['file_id'],'input_id':asset['id'],'sha256':asset['sha256'],'task_id':body['task_id'],'configuration':operation}
+                elif self.path=='/api/project-file-delete':
+                    if set(body)!={'project_id','file_id','confirm'} or body['confirm']!=body['file_id']:
+                        raise ValidationError('Exact file ID confirmation required')
+                    result=ProjectFileService(database).delete(body['project_id'],body['file_id'])
                 elif self.path=='/api/task-approval':
                     if set(body)!={'preview_token','reason'}: raise ValidationError('Inspected preview and reason required')
                     reason=body['reason']
