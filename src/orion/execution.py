@@ -17,6 +17,7 @@ from .approvals import authorize, proposal
 from .inputs import operation
 from .verification import VerificationService
 from .dependencies import DependencyService
+from .research import canonical, digest
 
 
 def _invoke(sender, handler, snapshot):
@@ -88,10 +89,8 @@ class ExecutionService:
             now = timestamp()
             c.execute("INSERT INTO executions VALUES (?,?,?,?,?,?,?,?,?,?)", (execution_id, task["id"], worker_id, "running", now, None, attempt, None, None, None))
             if worker_id == 'research-synthesize':
-                from .research import canonical, digest
                 c.execute('INSERT INTO synthesis_runs VALUES (?,?,?,NULL)',(execution_id,canonical(proposed['synthesis']),digest(proposed['synthesis'])))
             if worker_id == "research-collect":
-                from .research import canonical, digest
                 c.execute("INSERT INTO research_runs VALUES (?,?,?,NULL)", (execution_id, canonical(proposed["research"]), digest(proposed["research"])))
             if csv_content is not None:
                 c.execute("INSERT INTO execution_inputs VALUES (?,?,?,?,?,?)", (execution_id, csv_input["input_id"], csv_input["sha256"], json.dumps(csv_input["limits"]), worker.version, None))
@@ -123,7 +122,16 @@ class ExecutionService:
             try:
                 with self.database.connect(write=True) as c:
                     c.execute("UPDATE execution_ownership SET phase='starting', recorded_at=? WHERE execution_id=?", (timestamp(), execution_id))
-                process.start()
+                try:
+                    process.start()
+                except BaseException:
+                    # start() raised before a pid existed (for example the OS could not
+                    # allocate memory): no child was launched, so record that evidence
+                    # instead of leaving the claim stuck in 'starting' forever.
+                    synthesis_uncertain = False  # the model was never called
+                    with self.database.connect(write=True) as c:
+                        c.execute("UPDATE execution_ownership SET phase='not_started', recorded_at=? WHERE execution_id=?", (timestamp(), execution_id))
+                    raise
                 with self.database.connect(write=True) as c:
                     c.execute("UPDATE execution_ownership SET phase='running', child_pid=?, recorded_at=? WHERE execution_id=?", (process.pid, timestamp(), execution_id))
                 sender.close()
@@ -149,9 +157,12 @@ class ExecutionService:
                 receiver.close()
                 sender.close()
             if worker_id == "research-collect":
-                from .research import canonical, digest
                 with self.database.connect(write=True) as c:
                     c.execute("INSERT INTO research_captures VALUES (?,?,?)", (execution_id, canonical(output["captures"]), digest(output["captures"])))
+            if worker_id == 'research-synthesize' and 'provider_usage' in output:
+                usage = output.pop('provider_usage')
+                with self.database.connect(write=True) as c:
+                    append_event(c, 'synthesis_provider_usage', task['id'], execution_id, usage)
             # Only engine-generated UUID names; exclusive creation prevents overwrites.
             data_dir = self.database.path.resolve().parent
             artifact_dir = data_dir / "artifacts"
@@ -171,11 +182,11 @@ class ExecutionService:
             result = {"artifact": str(artifact), "task_count": len(snapshot.get("tasks", [])),
                       "output_validated": True, "independent_evaluation": False}
             if csv_content is not None:
-                digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+                artifact_digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
                 with self.database.connect(write=True) as c:
-                    c.execute("UPDATE execution_inputs SET artifact_digest=? WHERE execution_id=?", (digest, execution_id))
+                    c.execute("UPDATE execution_inputs SET artifact_digest=? WHERE execution_id=?", (artifact_digest, execution_id))
                 verified = VerificationService(self.database).verify(execution_id)
-                result.update(artifact_id=execution_id, input_id=csv_input["input_id"], row_count=output.get("row_count"), column_count=output.get("column_count"), artifact_sha256=digest, verification_id=verified["id"], verification_status=verified["status"], independent_evaluation=verified["status"] == "passed")
+                result.update(artifact_id=execution_id, input_id=csv_input["input_id"], row_count=output.get("row_count"), column_count=output.get("column_count"), artifact_sha256=artifact_digest, verification_id=verified["id"], verification_status=verified["status"], independent_evaluation=verified["status"] == "passed")
                 if verified["status"] != "passed":
                     raise ValidationError("Independent CSV verification failed")
             if worker_id == "research-collect":

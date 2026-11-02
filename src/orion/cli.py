@@ -28,6 +28,7 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--log-dir")
     commands = root.add_subparsers(dest="command", required=True)
     commands.add_parser("init")
+    commands.add_parser('backup').add_argument('path')
     commands.add_parser("status")
     dependencies = commands.add_parser("dependencies").add_subparsers(dest="action",required=True)
     add = dependencies.add_parser("add")
@@ -161,6 +162,7 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     result = dependencies.project(args["project"])
                     if args.get("state"): result["tasks"] = [t for t in result["tasks"] if t["classification"]==args["state"]]
+            elif command == 'backup': result={'backup':db.backup(args['path'])}
             elif command == 'research':
                 research = ResearchService(db)
                 action = args.pop('action')

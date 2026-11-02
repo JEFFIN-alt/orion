@@ -5,13 +5,21 @@ from .service import timestamp
 from .research import canonical
 from .models import ValidationError
 
+def response_metadata(response):
+    result={'provider':response.provider,'model':response.model,'elapsed_seconds':response.elapsed_seconds}
+    for key in ('prompt_eval_count','eval_count','load_duration','eval_duration','total_duration'):
+        value=getattr(response,key,None)
+        if value is not None: result[key]=value
+    return result
+
 def synthesize(snapshot,provider: Provider | None=None):
     operation=snapshot['synthesis']
+    from .workers import resolve
     configured=AIConfig(**operation['model'])
     provider=provider if provider is not None else create_provider(configured)
     result={'schema_version':1,'kind':'research_synthesis','execution_id':snapshot['execution_id'],
         'source_execution':operation['source_execution'],'evidence_digest':operation['evidence_digest'],
-        'worker_version':'1','created_at':timestamp(),'configured_model':operation['model'],
+        'worker_version':resolve('research-synthesize').version,'created_at':timestamp(),'configured_model':operation['model'],
         'response_metadata':None,'response_text':'','provider_error':None,'inference_uncertain':False}
     if 'projection_digest' in operation:
         result['projection_digest']=operation['projection_digest']
@@ -19,9 +27,12 @@ def synthesize(snapshot,provider: Provider | None=None):
         response=provider.chat(messages(operation,snapshot['execution_id']),analysis_schema(operation))
         if not isinstance(response.content,str): raise ProviderError('Provider returned non-text analysis')
         if len(response.content.encode())>operation['configuration']['max_response_bytes']:
-            result['response_metadata']={'provider':response.provider,'model':response.model,'elapsed_seconds':response.elapsed_seconds}
+            result['response_metadata']=response_metadata(response)
             raise ProviderError('Provider analysis exceeded configured output bytes')
-        result.update(response_text=response.content,response_metadata={'provider':response.provider,'model':response.model,'elapsed_seconds':response.elapsed_seconds})
+        result.update(response_text=response.content,response_metadata=response_metadata(response))
+        if response.usage:
+            # Transport-only field: the engine persists metrics as a separate event.
+            result['provider_usage']=response.usage
     except ProviderError as exc:
         result.update(provider_error=str(exc)[:1200],inference_uncertain=exc.uncertain)
     except Exception:

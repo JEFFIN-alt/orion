@@ -1,5 +1,6 @@
 """Fixed public API connectors. External text is data, never executable instructions."""
 import base64
+import os
 from http.client import HTTPException
 import re
 import time
@@ -38,7 +39,11 @@ class PublicClient:
         self.remaining-=1
         self.last_request=time.monotonic()
         capture['retrieved_at']=timestamp()
-        request=Request(url,headers={'User-Agent':'ProjectOrion/0.1 (bounded local research collector)',
+        agent='ProjectOrion/0.1 (bounded local research collector)'
+        contact=os.getenv('ORION_CONTACT_EMAIL','')
+        if re.fullmatch(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}',contact):
+            agent=agent[:-1]+'; mailto:'+contact+')'
+        request=Request(url,headers={'User-Agent':agent,
             'Accept':'application/vnd.github+json' if provider=='github' else 'application/json',
             'X-GitHub-Api-Version':'2022-11-28','Accept-Encoding':'identity'})
         try:

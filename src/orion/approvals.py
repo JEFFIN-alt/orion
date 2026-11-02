@@ -10,6 +10,10 @@ from .workers import resolve
 
 def proposal(c, database, task_id, worker_id, worker, timeout=10):
     task = Service(database)._get(c, "tasks", task_id)
+    from .task_workers import binding
+    assigned = binding(c, task['id'])
+    if assigned and (assigned['worker_id'] != worker_id or assigned['version'] != worker.version):
+        raise ValidationError('Requested worker differs from the current task assignment')
     project = Service(database)._get(c, "projects", task["project_id"])
     rows = c.execute("SELECT * FROM tasks WHERE project_id=? ORDER BY created_at,id LIMIT 10001", (project["id"],)).fetchall()
     if len(rows) > 10000:
@@ -17,6 +21,8 @@ def proposal(c, database, task_id, worker_id, worker, timeout=10):
     data = {"task_id": task["id"], "worker_id": worker_id, "worker": worker.describe(),
             "timeout": float(timeout), "data_directory": str(database.path.resolve().parent),
             "project": project, "tasks": [dict(row) for row in rows]}
+    if assigned:
+        data['assignment'] = assigned
     dependencies = [dict(row) for row in c.execute("SELECT prerequisite_id,created_at FROM task_dependencies WHERE task_id=? ORDER BY prerequisite_id", (task["id"],))]
     if dependencies:
         data["dependencies"] = dependencies
@@ -66,7 +72,7 @@ class ApprovalService:
             append_event(c, "approval_required", task["id"])
         return {"task_id": task["id"], "approval_required": True}
 
-    def request(self, task_id, worker_id, reason):
+    def request(self, task_id, worker_id, reason, *, expected_fingerprint=None):
         reason = required(reason, "reason")
         worker = resolve(worker_id)
         with self.database.connect(write=True) as c:
@@ -74,6 +80,8 @@ class ApprovalService:
             if task["status"] != "pending":
                 raise ValidationError("Approval requests require a pending task")
             data, fingerprint = proposal(c, self.database, task["id"], worker_id, worker)
+            if expected_fingerprint is not None and fingerprint != expected_fingerprint:
+                raise ValidationError('Preview changed; inspect a fresh proposal before requesting approval')
             c.execute("INSERT OR IGNORE INTO approval_policy VALUES (?,?)", (task["id"], timestamp()))
             approval_id = str(uuid4())
             c.execute("INSERT INTO approvals VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (approval_id, task["id"], worker_id, worker.responsibility, fingerprint, json.dumps(data), reason, timestamp(), "pending", None, None, None))
@@ -91,7 +99,7 @@ class ApprovalService:
         with self.database.connect() as c:
             return [dict(row) for row in c.execute("SELECT * FROM approvals WHERE status='pending' ORDER BY created_at")]
 
-    def decide(self, approval_id, decision, explanation):
+    def decide(self, approval_id, decision, explanation, *, expected_fingerprint=None):
         if decision not in ("approved", "rejected"):
             raise ValidationError("Decision must be approved or rejected")
         explanation = required(explanation, "explanation")
@@ -99,6 +107,13 @@ class ApprovalService:
             row = c.execute("SELECT * FROM approvals WHERE id=?", (identifier(approval_id),)).fetchone()
             if row is None or row["status"] != "pending":
                 raise ValidationError("Approval does not exist or already has a decision")
+            if expected_fingerprint is not None:
+                if row['execution_id'] is not None or row['fingerprint'] != expected_fingerprint:
+                    raise ValidationError('Approval was consumed or changed; inspect it again')
+                task = Service(self.database)._get(c, 'tasks', row['task_id'])
+                _, current = proposal(c, self.database, task['id'], row['worker_id'], resolve(row['worker_id']))
+                if task['status'] != 'pending' or current != expected_fingerprint:
+                    raise ValidationError('Approval is stale; a fresh request is required')
             c.execute("UPDATE approvals SET status=?, decided_at=?, explanation=? WHERE id=?", (decision, timestamp(), explanation, row["id"]))
             append_event(c, "approval_granted" if decision == "approved" else "approval_rejected", row["task_id"], details={"approval_id": row["id"]})
         return self.get(approval_id)

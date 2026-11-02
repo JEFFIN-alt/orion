@@ -16,4 +16,4 @@ orion = "orion.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-orion = ["chat.html"]
+orion = ["chat.html", "control-room.css", "control-room.js"]

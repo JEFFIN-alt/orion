@@ -140,6 +140,26 @@ class ChatTests(unittest.TestCase):
             result=json.load(urlopen(request));self.assertEqual(result["error"],"Model missing")
         finally: server.shutdown();server.server_close();thread.join()
 
+    def test_database_lock_get_returns_sanitized_500_and_logs_traceback(self):
+        class LockedChat:
+            def __init__(self,*args): pass
+            def list(self): raise sqlite3.OperationalError('database is locked')
+        with patch('orion.web_chat.ConversationService',LockedChat):
+            server=make_server(self.db,self.provider.config,0,self.provider)
+        thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+        try:
+            with self.assertLogs('orion.web',level='ERROR') as captured:
+                with self.assertRaises(HTTPError) as caught:
+                    urlopen(f'http://127.0.0.1:{server.server_port}/api/conversations')
+            self.assertEqual(caught.exception.code,500)
+            body=json.loads(caught.exception.read())
+            self.assertEqual(body,{'error':'Internal error; see the Orion log'})
+            self.assertNotIn('locked',str(body).lower())
+            self.assertNotIn('Traceback',str(body))
+            self.assertIn('Traceback',captured.output[0])
+            self.assertIn('database is locked',captured.output[0])
+        finally: server.shutdown();server.server_close();thread.join()
+
     def test_migration_preserves_all_previous_tables(self):
         # Build a populated schema-4 fixture from the actual migration definitions.
         from orion.database import Database,SCHEMA,MIGRATION_2,MIGRATION_3,MIGRATION_4
@@ -156,31 +176,49 @@ class ChatTests(unittest.TestCase):
         self.assertEqual(old.health()['schema_version'],8)
 
 
-class OllamaHttpTests(unittest.TestCase):
-    def test_adapter_real_http_fixture(self):
+class OllamaHttpFixture:
+    def __init__(self):
+        self.mode='good';self.metrics=None;self.response_factory=None;self.payload=None
+    def start(self):
+        fixture=self
         class Handler(BaseHTTPRequestHandler):
-            mode="good"
             def log_message(self,*args): pass
             def do_GET(self):
                 body=json.dumps({"models":[{"name":"fixture"}]}).encode();self.send_response(200);self.end_headers();self.wfile.write(body)
             def do_POST(self):
-                payload=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
-                self.server.payload=payload
-                if self.mode=='slow': time.sleep(.2)
+                request=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+                fixture.payload=request
+                if fixture.mode=='slow': time.sleep(.2)
+                body={"done":True,"model":"fixture","message":{"role":"assistant","content":"Fixture HTTP response"}}
+                if fixture.response_factory: body['message']['content']=fixture.response_factory(request)
+                if fixture.metrics is not None: body.update(fixture.metrics)
                 self.send_response(200);self.end_headers()
-                try: self.wfile.write(b'invalid' if self.mode=='bad' else json.dumps({"done":True,"model":"fixture","message":{"role":"assistant","content":"Fixture HTTP response"}}).encode())
+                try: self.wfile.write(b'invalid' if fixture.mode=='bad' else json.dumps(body).encode())
                 except OSError: pass
-        server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
-        thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+        self.server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
+        self.thread=threading.Thread(target=self.server.serve_forever,daemon=True);self.thread.start()
+        self.endpoint=f'http://127.0.0.1:{self.server.server_port}'
+        return self
+    def close(self): self.server.shutdown();self.server.server_close();self.thread.join()
+
+
+class OllamaHttpTests(unittest.TestCase):
+    def test_adapter_real_http_fixture(self):
+        fixture=OllamaHttpFixture().start()
         try:
-            provider=OllamaProvider(AIConfig(endpoint=f'http://127.0.0.1:{server.server_port}',model='fixture',timeout=1))
+            provider=OllamaProvider(AIConfig(endpoint=fixture.endpoint,model='fixture',timeout=1))
             self.assertTrue(provider.availability()['available'])
             self.assertEqual(provider.chat([{'role':'user','content':'Hi'}]).content,'Fixture HTTP response')
-            self.assertEqual(server.payload['options']['num_ctx'],4096)
-            Handler.mode='bad'
+            absent=provider.chat([{'role':'user','content':'Hi'}])
+            self.assertIsNone(absent.prompt_eval_count)
+            fixture.mode='metrics';fixture.metrics=dict(prompt_eval_count=4096,eval_count=12,load_duration=10,eval_duration=20,total_duration=30)
+            measured=provider.chat([{'role':'user','content':'Hi'}])
+            self.assertEqual((measured.prompt_eval_count,measured.eval_count,measured.load_duration,measured.eval_duration,measured.total_duration),(4096,12,10,20,30))
+            self.assertEqual(fixture.payload['options']['num_ctx'],4096)
+            fixture.mode='bad';fixture.metrics=None
             with self.assertRaises(ProviderError): provider.chat([])
-            Handler.mode='slow'
+            fixture.mode='slow'
             provider=OllamaProvider(replace(provider.config,timeout=.05))
             with self.assertRaises(ProviderError): provider.chat([])
-        finally: server.shutdown();server.server_close();thread.join()
+        finally: fixture.close()
         self.assertFalse(provider.availability()['available'])

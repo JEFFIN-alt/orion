@@ -1,7 +1,10 @@
+import os
 import sqlite3
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
+from .models import ValidationError
 
 SCHEMA = (
     """CREATE TABLE projects (
@@ -149,6 +152,63 @@ class Database:
             raise
         finally:
             connection.close()
+
+    def backup(self, destination: Path) -> str:
+        target=Path(destination).expanduser()
+        if not target.is_absolute(): target=Path(os.path.abspath(target))
+        if target.exists() or target.is_symlink():
+            raise ValidationError(f'Backup destination already exists: {target}')
+        if not target.parent.is_dir():
+            raise ValidationError(f'Backup destination folder does not exist: {target.parent}')
+        if target.resolve()==self.path.expanduser().resolve():
+            raise ValidationError('Backup destination is the source database')
+        partial=target.with_name(target.name+'.partial')
+        source=output=None
+        partial_created=False
+        target_published=False
+        try:
+            try:
+                with partial.open('xb'):
+                    pass
+                partial_created=True
+            except FileExistsError:
+                raise ValidationError(f'Backup partial destination already exists: {partial}') from None
+            source=sqlite3.connect(self.path,timeout=5)
+            output=sqlite3.connect(partial,timeout=5)
+            source.backup(output)
+            output.commit()
+            if output.execute('PRAGMA integrity_check').fetchone()[0]!='ok':
+                raise ValidationError('Backup failed its integrity check')
+            output.close()
+            output=None
+            os.link(partial,target)
+            target_published=True
+        except (sqlite3.Error,OSError) as exc:
+            raise ValidationError(f'Database backup failed: {exc}') from None
+        finally:
+            original_error=sys.exc_info()[0] is not None
+            cleanup_error=None
+            for connection in (output,source):
+                if connection is not None:
+                    try:
+                        connection.close()
+                    except sqlite3.Error as exc:
+                        if cleanup_error is None: cleanup_error=exc
+            if partial_created:
+                try:
+                    partial.unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    if cleanup_error is None: cleanup_error=exc
+            if cleanup_error is not None and target_published:
+                try:
+                    target.unlink()
+                except OSError:
+                    pass
+            if cleanup_error is not None and not original_error:
+                raise ValidationError(f'Database backup cleanup failed: {cleanup_error}') from None
+        return str(target)
 
     def initialize(self) -> None:
         with self.connect(write=True) as connection:

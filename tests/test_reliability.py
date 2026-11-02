@@ -187,7 +187,9 @@ class ReliabilityTests(unittest.TestCase):
         # Unprotected test task: only this test process is intentionally terminated.
         task = self.service.create_task(self.project["id"], "Crash fixture")
         script = "from pathlib import Path; from test_reliability import short_worker; from dataclasses import replace; from orion.workers import REGISTRY; from orion.execution import ExecutionService; from orion.database import Database; import sys; ExecutionService(Database(Path(sys.argv[1])),registry={'test':replace(REGISTRY['project-status'],handler=short_worker)}).execute(sys.argv[2],'test')"
-        env = dict(os.environ, PYTHONPATH=str(Path(__file__).parent))
+        repo_src=Path(__file__).resolve().parents[1]/'src'
+        tests_dir=Path(__file__).resolve().parent
+        env = dict(os.environ, PYTHONPATH=os.pathsep.join((str(repo_src),str(tests_dir))))
         parent = subprocess.Popen([sys.executable,"-c",script,str(self.db.path),task["id"]], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             deadline = time.monotonic() + 8

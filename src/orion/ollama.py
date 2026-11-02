@@ -64,7 +64,7 @@ class OllamaProvider:
         state = self.availability()
         if not state["available"]: raise ProviderError(state["message"])
         payload = {"model":self.config.model,"messages":messages,"stream":False,"think":False,"keep_alive":0,
-            "options":{"num_ctx":self.config.context,"num_predict":self.config.max_output,"temperature":0.2}}
+            "options":{"num_ctx":self.config.context,"num_predict":self.config.max_output,"temperature":self.config.temperature}}
         if schema is not None: payload["format"] = schema
         start = time.monotonic()
         response = self._request("/api/chat", payload)
@@ -72,4 +72,10 @@ class OllamaProvider:
         if response.get("done") is not True or not isinstance(message,dict) or message.get("role") != "assistant" or not isinstance(message.get("content"),str) or not message["content"].strip() or len(message["content"]) > 16000 or message.get("tool_calls"):
             raise ProviderError("Ollama returned an incomplete or unsupported assistant response")
         if not isinstance(response.get("model"),str): raise ProviderError("Ollama response omitted model identity")
-        return Response(message["content"], response["model"], "ollama", round(time.monotonic()-start,3))
+        metrics={}
+        for key in ('prompt_eval_count','eval_count','load_duration','eval_duration','total_duration'):
+            value=response.get(key)
+            if value is not None:
+                if type(value) is not int or value<0: raise ProviderError('Ollama returned invalid response metrics')
+                metrics[key]=value
+        return Response(message["content"], response["model"], "ollama", round(time.monotonic()-start,3), **metrics)

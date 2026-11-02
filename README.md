@@ -20,6 +20,10 @@ From `C:\Users\JEFFIN\Projects\orion`:
 
 Replace UUID placeholders with returned identifiers. `setup_dev.py` registers src in this venv with a .pth file without installing dependencies. Rerun if the project moves. Packaging metadata is provided for later standard installation; building a distribution requires setuptools, which has not been installed by this milestone.
 
+## Running the tests
+
+From the repository root, the test suite can run in a venv with `setup_dev.py`. If the package is not installed or registered in that environment, set `PYTHONPATH` to the repository's `src` folder before running `python -m unittest discover -s tests -v` (PowerShell: `$env:PYTHONPATH = (Resolve-Path .\src).Path`).
+
 `projects` and `tasks` both support create, list, get, update and transition. Use command-level `--help`. Tasks list accepts `--project`. Updates accept name/title, description, and for tasks priority and summary. Priority is an integer 0â€“100; larger values sort first in project-filtered lists. An empty summary clears it to empty text. Identifiers are UUIDs. Output is JSON; errors go to stderr. Exit codes: 0 success, 1 application error, 2 CLI usage error.
 
 ## Configuration and storage
@@ -28,7 +32,7 @@ Global options `--database PATH --log-dir PATH` precede the command. Alternative
 
 Run init explicitly. Schema version 8 uses PRAGMA user_version. Repeated initialization preserves data; unsupported versions fail. Every connection enables foreign keys. Writes use BEGIN IMMEDIATE transactions with a five-second lock timeout, rollback on failure, and explicit connection closure. State checking and transitions occur under the same write transaction. SQL identifiers come only from internal allowlists; input values are parameterized. Timestamps are UTC. No delete operation is exposed.
 
-Use status for SQLite integrity and foreign-key diagnostics. For a simple backup, stop all Orion commands, then copy the database file to a separate backup location. Restore only while Orion is stopped and validate the copy with status. Initialization migrates versions 1 through 7 to 8 transactionally. Automated backups are not implemented. Interrupted transactions roll back; previously persisted in_progress tasks remain visible for an explicit decision. There is no automatic task replay.
+Use status for SQLite integrity and foreign-key diagnostics. Create an online, transactionally consistent backup with `python -m orion backup PATH`; the destination must not already exist. Orion writes to an exclusive `PATH.partial`, checks the completed SQLite copy with `PRAGMA integrity_check`, closes it, then publishes it with a non-overwriting hard link. A failed backup removes its partial file; an existing stale partial is preserved and the request is refused. Restore only while Orion is stopped and validate the copy with status. Initialization migrates versions 1 through 7 to 8 transactionally. Interrupted transactions roll back; previously persisted in_progress tasks remain visible for an explicit decision. There is no automatic task replay.
 
 ## State rules
 
@@ -350,3 +354,9 @@ space with a documented byte-to-token estimate; it is not an exact tokenizer.
 See [the projection report](reports/M10_STAGE3_2_EVIDENCE_PROJECTION_REPORT.md)
 for the real packet preview, tests, limits, and the separate approval required
 before any live synthesis.
+
+Verification has gating checks and advisories. Gating checks stop at the first failure. Advisories run best-effort after gating passes or fails; in warn mode they never change the verification outcome. Advisory messages are stored in `source_references.warnings` in the existing verification record. If advisory analysis cannot be parsed, or an advisory itself errors, that is recorded there without preventing the verification row from being saved.
+
+Numeric grounding is controlled by `NUMERIC_GROUNDING` in `src/orion/synthesis_verify.py` and defaults to `"warn"`. It checks multi-digit integers and decimals in cited factual claims against evidence visible to the model, the research question, and the source count. Warnings identify the claim path, unmatched number, and cited source IDs. Version 1 does not specially interpret suffix forms such as 40k or percentages. Changing the setting to `"fail"` makes numeric grounding failures fail verification; re-verifying older runs can therefore produce a different outcome.
+
+The public research collector keeps its existing User-Agent unless `ORION_CONTACT_EMAIL` contains a simple valid email address; then it adds a mailto: contact parameter for Crossref/GitHub. Invalid or unset values leave the header unchanged. This request header is transport metadata and is never stored in packets, artifacts, events, or approval fingerprints.

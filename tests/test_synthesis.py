@@ -46,12 +46,18 @@ class FixtureProvider:
           'next_experiments':['Evaluate a real model with a human-reviewed evidence set.'],
           'confidence':{'level':'low','explanation':'Fixture behavior only; no AI quality assessment.'}}
         if self.mode=='unknown': value['key_findings'][0]['source_ids']=['doi:invented']
+        if self.mode=='unknown_and_wrong_number':
+            value['key_findings']=[
+              {'text':'This finding cites a fabricated source.','source_ids':['doi:invented']},
+              {'text':'GraphRAG has 38,672 forks.','source_ids':['repository:778431525']}]
         if self.mode=='missing': value['key_findings'][0]['source_ids']=[]
         if self.mode=='extra': value['execute_shell']='forbidden'
         if self.mode=='wrong_execution': value['execution_id']=str(uuid4())
         if self.mode=='confidence': value['confidence']['level']='certain'
         if self.mode=='many': value['key_findings']=[claim]*9
         if self.mode=='supported': value['recommendation']={'supported':True,'text':'Fixture recommendation','source_ids':ids[:1]}
+        if self.mode=='wrong_number':
+            value['executive_summary']={'text':'GraphRAG has 38,672 forks.','source_ids':['repository:778431525']}
         text='not JSON' if self.mode=='malformed' else 'x'*16001 if self.mode=='oversized' else canonical(value)
         return Response(text,'fixture-no-ai','fixture',0.01)
 
@@ -224,6 +230,89 @@ class SynthesisIntegrationTests(unittest.TestCase):
         observed={'repository:866513204':5738,'repository:778431525':3867}
         self.assertEqual(observed['repository:778431525'],3867)
         self.assertNotEqual(observed['repository:778431525'],38672)
+    def test_operation_and_approval_fingerprint_follow_registry_version(self):
+        from orion.workers import REGISTRY
+        version_one=self.synthesis.get(self.task['id'])
+        request_one=self.approvals.request(self.task['id'],'research-synthesize','Version one preview')
+        worker_two=replace(REGISTRY['research-synthesize'],version='2',handler=fixture_synthesize)
+        with patch.dict(REGISTRY,{'research-synthesize':worker_two}):
+            version_two=self.synthesis.get(self.task['id'])
+            self.assertEqual(version_two['worker_version'],'2')
+            request_two=self.approvals.request(self.task['id'],'research-synthesize','Version two preview')
+            self.assertNotEqual(request_one['fingerprint'],request_two['fingerprint'])
+        self.assertEqual(self.synthesis.get(self.task['id'])['worker_version'],'1')
+
+    def test_envelope_reports_registered_version(self):
+        from orion.workers import REGISTRY
+        operation=self.synthesis.get(self.task['id'])
+        snapshot={'synthesis':operation,'execution_id':str(uuid4())}
+        self.assertEqual(synthesize(snapshot,provider=FixtureProvider())['worker_version'],'1')
+        worker_two=replace(REGISTRY['research-synthesize'],version='2')
+        with patch.dict(REGISTRY,{'research-synthesize':worker_two}):
+            operation=self.synthesis.get(self.task['id'])
+            snapshot={'synthesis':operation,'execution_id':str(uuid4())}
+            self.assertEqual(synthesize(snapshot,provider=FixtureProvider())['worker_version'],'2')
+
+    def test_version_drift_between_approval_and_worker_is_rejected(self):
+        from orion.workers import REGISTRY
+        from orion.verification import VerificationService
+        worker_two=replace(REGISTRY['research-synthesize'],version='2',handler=fixture_synthesize)
+        # ExecutionService uses spawn: the child re-imports workers.py and does not inherit this parent patch.
+        with patch.dict(REGISTRY,{'research-synthesize':worker_two}):
+            self.engine.registry={'research-synthesize':worker_two}
+            request=self.approvals.request(self.task['id'],'research-synthesize','Version two operation')
+            self.approvals.decide(request['id'],'approved','Version two approved')
+            run=self.engine.execute(self.task['id'],'research-synthesize')
+        self.assertEqual(run['status'],'failed')
+        verification=VerificationService(self.db).history(run['id'])[-1]
+        self.assertEqual(verification['status'],'failed')
+        self.assertFalse(next(c for c in verification['checks'] if c['name']=='execution_binding')['passed'])
+
+    def test_context_metrics_are_optional_and_warn_at_num_ctx(self):
+        from orion.verification import VerificationService
+        from test_chat import OllamaHttpFixture
+        fixture=OllamaHttpFixture().start()
+        fixture.response_factory=lambda payload: FixtureProvider().chat(payload['messages'],payload.get('format')).content
+        engine=ExecutionService(self.db)
+        for case,metrics,expected_warning in (
+            ('below',{'prompt_eval_count':100,'eval_count':12,'load_duration':10,'eval_duration':20,'total_duration':30},False),
+            ('at-limit',{'prompt_eval_count':4096,'eval_count':12,'load_duration':10,'eval_duration':20,'total_duration':30},True),
+            ('legacy-absent',None,False)):
+            fixture.metrics=metrics
+            task=self.service.create_task(self.project['id'],'Metrics '+case)
+            env={'ORION_AI_PROVIDER':'ollama','ORION_AI_MODEL':'fixture','ORION_AI_ENDPOINT':fixture.endpoint,
+                 'ORION_AI_CONTEXT':'4096','ORION_AI_MAX_OUTPUT':'1024','ORION_AI_TIMEOUT':'10'}
+            with patch.dict(os.environ,env):
+                self.synthesis.configure(task['id'],self.source['id'])
+                request=self.approvals.request(task['id'],'research-synthesize','Review metrics fixture')
+                self.approvals.decide(request['id'],'approved','Fixture approval')
+                run=engine.execute(task['id'],'research-synthesize')
+            self.assertEqual(run['status'],'succeeded',run['error'])
+            self.assertEqual(run['latest_verification']['status'],'passed')
+            artifact=json.loads(Path(run['result']['artifact']).read_text())
+            metadata=artifact['response_metadata']
+            checks=VerificationService(self.db).history(run['id'])[-1]['checks']
+            context=next((check for check in checks if check['name']=='context_truncation'),None)
+            self.assertEqual(bool(context and context['warnings']),expected_warning)
+            if metrics is None:
+                self.assertFalse(set(metrics or ()) & set(metadata))
+                self.assertIsNone(context)
+            else:
+                for key,value in metrics.items(): self.assertEqual(metadata[key],value)
+        fixture.close()
+
+    def test_approval_requested_under_old_version_is_stale(self):
+        request=self.approvals.request(self.task['id'],'research-synthesize','Version one operation')
+        self.approvals.decide(request['id'],'approved','Version one approved')
+        from orion.workers import REGISTRY
+        worker_two=replace(REGISTRY['research-synthesize'],version='2',handler=fixture_synthesize)
+        with patch.dict(REGISTRY,{'research-synthesize':worker_two}):
+            self.engine.registry={'research-synthesize':worker_two}
+            with self.assertRaisesRegex(ValidationError,'current, unused approved request'):
+                self.engine.execute(self.task['id'],'research-synthesize')
+        self.assertEqual(self.engine.history(self.task['id']),[])
+        self.assertEqual(self.approvals.get(request['id'])['status'],'approved')
+        self.assertIsNone(self.approvals.get(request['id'])['execution_id'])
     def test_unavailable_persisted_failure(self):
         self.approve();run=self.execute('unavailable')
         self.assertEqual(run['status'],'failed');self.assertIn('unavailable',run['error'])

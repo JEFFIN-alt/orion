@@ -29,8 +29,8 @@ from orion.database import Database
 
 PAPER={'DOI':'10.1234/example','title':['Fixture research title'],'author':[{'given':'Ada','family':'Example'}],
        'issued':{'date-parts':[[2024]]},'publisher':'Fixture publisher','container-title':['Fixture journal'],'abstract':'<jats:p>Returned abstract</jats:p>','URL':'https://doi.org/10.1234/example'}
-REPO={'id':123,'full_name':'example/research','name':'research','owner':{'login':'example'},'html_url':'https://github.com/example/research',
-      'description':'Fixture repository description','language':'Python','default_branch':'main','stargazers_count':10,'forks_count':2,'updated_at':'2026-01-01T00:00:00Z'}
+REPO={'id':778431525,'full_name':'example/research','name':'research','owner':{'login':'example'},'html_url':'https://github.com/example/research',
+      'description':'Fixture repository description','language':'Python','default_branch':'main','stargazers_count':36489,'forks_count':3867,'updated_at':'2026-01-01T00:00:00Z'}
 
 class ForwardOpener:
     def __init__(self,base): self.base=base
@@ -165,6 +165,29 @@ class ResearchHTTPTests(unittest.TestCase):
         for url in ('http://api.github.com/','https://evil.example/','https://api.github.com@evil.example/'):
             with self.assertRaises(ValueError): client.get('github',url)
 
+    def test_contact_email_user_agent_is_validated_and_not_persisted(self):
+        snap=snapshot(include_readme=False)
+        fixed=patch('orion.research_sources.timestamp',return_value='2026-01-01T00:00:00+00:00')
+        headers=[]
+        with fixture() as (base,_):
+            class CapturingOpener:
+                def open(self,request,timeout):
+                    headers.append(request.get_header('User-agent'))
+                    return ForwardOpener(base).open(request,timeout)
+            def collect_with(env):
+                with patch.dict(os.environ,env,clear=False),fixed:
+                    client=PublicClient(snap['research']['configuration']);client.opener=CapturingOpener()
+                    return collect(snap,client)
+            baseline=collect_with({'ORION_CONTACT_EMAIL':''})
+            valid=collect_with({'ORION_CONTACT_EMAIL':'ceo@example.org'})
+            invalid=collect_with({'ORION_CONTACT_EMAIL':'not-an-email'})
+        self.assertEqual(baseline,valid)
+        self.assertEqual(baseline,invalid)
+        self.assertTrue(all(h=='ProjectOrion/0.1 (bounded local research collector)' for h in headers[:2]))
+        self.assertTrue(all(h=='ProjectOrion/0.1 (bounded local research collector; mailto:ceo@example.org)' for h in headers[2:4]))
+        self.assertTrue(all(h=='ProjectOrion/0.1 (bounded local research collector)' for h in headers[4:]))
+        self.assertNotIn('ceo@example.org',canonical(baseline))
+
     def test_independent_rejection_of_corrupt_packets(self):
         snap,packet,_=self.packet(include_readme=False)
         changes=[lambda p:p.update(execution_id=str(uuid4())),lambda p:p.update(question='changed'),
@@ -196,6 +219,13 @@ class ResearchIntegrationTests(unittest.TestCase):
     def execute(self,mode='normal'):
         with fixture(mode) as (base,server), patch.dict(os.environ,{'ORION_TEST_HTTP':base}):
             return self.engine.execute(self.task['id'],'research-collect')
+
+    def test_contact_email_does_not_change_approval_fingerprint(self):
+        with patch.dict(os.environ,{'ORION_CONTACT_EMAIL':''}):
+            first=self.approvals.request(self.task['id'],'research-collect','Fixture baseline')
+        with patch.dict(os.environ,{'ORION_CONTACT_EMAIL':'ceo@example.org'}):
+            second=self.approvals.request(self.task['id'],'research-collect','Fixture with contact')
+        self.assertEqual(first['fingerprint'],second['fingerprint'])
 
     def test_approval_stale_configuration_and_verified_execution(self):
         with self.assertRaises(ValidationError): self.execute()

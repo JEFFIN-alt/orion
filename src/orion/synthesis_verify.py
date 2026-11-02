@@ -10,6 +10,9 @@ from .models import ValidationError
 from .events import append_event
 from .synthesis import select_evidence,project_evidence
 from .synthesis_schema import parse_analysis,citations
+from .grounding import ungrounded_numbers
+
+NUMERIC_GROUNDING = "warn"
 
 class SynthesisVerifier:
     def __init__(self,database): self.database=database
@@ -21,6 +24,8 @@ class SynthesisVerifier:
             execution=c.execute('SELECT * FROM executions WHERE id=?',(execution_id,)).fetchone()
         if run is None: raise ValidationError('No synthesis binding')
         checks=[];sha=None
+        operation=output=packet=projection=analysis=None
+        analysis_parse_attempted=False
         def check(name,valid):
             checks.append({'name':name,'passed':bool(valid)})
             if not valid: raise ValidationError(name)
@@ -38,7 +43,12 @@ class SynthesisVerifier:
             check('timestamp',isinstance(output['created_at'],str) and datetime.fromisoformat(output['created_at']).tzinfo is not None)
             check('provider_completed',output['provider_error'] is None and output['inference_uncertain'] is False)
             meta=output['response_metadata']
-            check('response_metadata',isinstance(meta,dict) and set(meta)=={'provider','model','elapsed_seconds'} and all(isinstance(meta[k],str) and 0<len(meta[k])<=120 for k in ('provider','model')) and type(meta['elapsed_seconds']) in (int,float) and math.isfinite(meta['elapsed_seconds']) and meta['elapsed_seconds']>=0)
+            metric_keys={'prompt_eval_count','eval_count','load_duration','eval_duration','total_duration'}
+            valid_meta=isinstance(meta,dict) and {'provider','model','elapsed_seconds'}<=set(meta) and set(meta)<={'provider','model','elapsed_seconds'}|metric_keys and all(isinstance(meta[k],str) and 0<len(meta[k])<=120 for k in ('provider','model')) and type(meta['elapsed_seconds']) in (int,float) and math.isfinite(meta['elapsed_seconds']) and meta['elapsed_seconds']>=0 and all(type(meta[k]) is int and meta[k]>=0 for k in set(meta)&metric_keys)
+            check('response_metadata',valid_meta)
+            if valid_meta and meta.get('prompt_eval_count') is not None:
+                truncated=meta['prompt_eval_count']>=operation['model']['context']
+                checks.append({'name':'context_truncation','passed':True,'warnings':['prompt_eval_count reached configured num_ctx; prompt may have been truncated'] if truncated else []})
             with self.database.connect() as c:
                 c.execute('BEGIN')
                 packet,source=select_evidence(c,self.database,operation['source_execution'])
@@ -60,6 +70,7 @@ class SynthesisVerifier:
                 check('approval_binding',approved['synthesis']==operation and approved['task_id']==execution['task_id'] and approval['task_id']==execution['task_id'] and approved['worker_id']==approval['worker_id']==execution['worker_id']=='research-synthesize')
             projection=project_evidence(packet,operation['configuration'])
             check('evidence_projection',projection==operation['evidence'])
+            analysis_parse_attempted=True
             analysis=parse_analysis(output['response_text'],execution_id,packet['question'],operation['configuration']['max_response_bytes'])
             check('strict_analysis_schema',True)
             resolved=citations(analysis,projection['sources'])
@@ -67,6 +78,59 @@ class SynthesisVerifier:
             check('artifact_unchanged',hashlib.sha256(read_bounded(path,131072)).hexdigest()==sha)
         except (OSError,ValueError,TypeError,KeyError,RecursionError,OverflowError) as exc:
             if not checks or checks[-1]['passed']: checks.append({'name':'analysis_and_provenance','passed':False,'reason':str(exc)[:250]})
+
+        # Grounding is an advisory pass after the gating checks, so a citation or
+        # other verification failure cannot suppress warnings for resolvable claims.
+        advisory_warnings=[];numeric_warnings=[]
+        try:
+            if analysis is None:
+                if analysis_parse_attempted:
+                    advisory_warnings.append('advisory skipped: analysis unparseable')
+                elif isinstance(output,dict) and isinstance(output.get('response_text'),str) and isinstance(operation,dict):
+                    try:
+                        question=packet['question'] if isinstance(packet,dict) else operation['evidence']['question']
+                        analysis=parse_analysis(output['response_text'],execution_id,question,operation['configuration']['max_response_bytes'])
+                    except Exception:
+                        advisory_warnings.append('advisory skipped: analysis unparseable')
+                else:
+                    advisory_warnings.append('advisory skipped: analysis unavailable after gating failure')
+            if analysis is not None:
+                sources=projection.get('sources',[]) if isinstance(projection,dict) else operation.get('evidence',{}).get('sources',[])
+                source_lookup={source['source_id']:source for source in sources}
+                claims=[('executive_summary',analysis['executive_summary'])]
+                for field in ('key_findings','comparisons','advantages','disadvantages'):
+                    claims.extend((field+'.'+str(index),claim) for index,claim in enumerate(analysis[field]))
+                if analysis['recommendation']['supported']:
+                    claims.append(('recommendation',analysis['recommendation']))
+                question=packet['question'] if isinstance(packet,dict) else operation['evidence']['question']
+                for label,claim in claims:
+                    cited=[source_lookup[sid] for sid in claim['source_ids'] if sid in source_lookup]
+                    if not cited:
+                        advisory_warnings.append(label+': not groundable: no resolvable source IDs')
+                        continue
+                    evidence=[]
+                    for source in cited:
+                        evidence.extend(str(value) for value in source.get('metadata',{}).values() if value is not None)
+                        for value in source.get('evidence',{}).values():
+                            if isinstance(value,str): evidence.append(value)
+                            elif isinstance(value,list): evidence.extend(item.get('text','') for item in value if isinstance(item,dict))
+                    evidence.extend((question,str(len(sources))))
+                    for number in ungrounded_numbers(claim['text'],evidence):
+                        cited_ids=', '.join(source['source_id'] for source in cited)
+                        numeric_warnings.append(f"{label}: {number} not found in cited sources [{cited_ids}]; interpretation needs review")
+                advisory_warnings.extend(numeric_warnings)
+        except Exception as exc:
+            try: message=str(exc)[:180]
+            except Exception: message='unavailable'
+            advisory_warnings.append(f'advisory_error: {type(exc).__name__}: {message}')
+
+        source_check=next((item for item in checks if item['name']=='source_references'),None)
+        if source_check is None:
+            source_check={'name':'source_references','passed':False,'resolved_references':[],'warnings':[]}
+            checks.append(source_check)
+        source_check.setdefault('warnings',[]).extend(advisory_warnings)
+        if NUMERIC_GROUNDING=='fail' and numeric_warnings:
+            checks.append({'name':'numeric_grounding','passed':False})
         passed=bool(checks) and all(x['passed'] for x in checks)
         record_id=str(uuid4())
         with self.database.connect(write=True) as c:

@@ -1,9 +1,11 @@
 import json
+import os
 import sqlite3
 import subprocess
 import sys
 import time
 from dataclasses import replace
+from pathlib import Path
 from uuid import uuid4
 import test_foundation
 import unittest
@@ -74,7 +76,9 @@ class ExecutionTests(unittest.TestCase):
         # Real separate process holds a running claim while its trusted test handler waits.
         script = "from pathlib import Path; from test_execution import slow; from dataclasses import replace; from orion.workers import REGISTRY; from orion.execution import ExecutionService; from orion.database import Database; import sys; e=ExecutionService(Database(Path(sys.argv[1])),registry={'test':replace(REGISTRY['project-status'],handler=slow)},timeout=2); e.execute(sys.argv[2],'test')"
         import os
-        env = dict(os.environ, PYTHONPATH=str(__import__('pathlib').Path(__file__).parent))
+        repo_src=Path(__file__).resolve().parents[1]/'src'
+        tests_dir=Path(__file__).resolve().parent
+        env = dict(os.environ, PYTHONPATH=os.pathsep.join((str(repo_src),str(tests_dir))))
         child = subprocess.Popen([sys.executable, "-c", script, str(self.db.path), self.task["id"]], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             deadline = time.monotonic() + 5

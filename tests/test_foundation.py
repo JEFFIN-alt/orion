@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from uuid import uuid4
 
 from orion.database import Database
@@ -98,6 +99,92 @@ class FoundationTests(unittest.TestCase):
         self.assertEqual(self.cli("tasks", "update", task_id).returncode, 1)
         self.assertEqual(self.cli("nonsense").returncode, 2)
         self.assertTrue((self.root / "logs" / "orion.log").is_file())
+
+    def test_online_backup_integrity_schema_and_row_counts(self):
+        task=self.service.create_task(self.project['id'],'Backed-up task')
+        destination=self.root/'backup.sqlite3'
+        result=self.cli('backup',str(destination))
+        self.assertEqual(result.returncode,0,result.stderr)
+        backup=sqlite3.connect(destination)
+        try:
+            self.assertEqual(backup.execute('PRAGMA integrity_check').fetchone()[0],'ok')
+            with self.db.connect() as source:
+                self.assertEqual(backup.execute('PRAGMA user_version').fetchone()[0],source.execute('PRAGMA user_version').fetchone()[0])
+                tables=[r[0] for r in source.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")]
+                for table in tables:
+                    self.assertEqual(backup.execute('SELECT COUNT(*) FROM "'+table+'"').fetchone()[0],source.execute('SELECT COUNT(*) FROM "'+table+'"').fetchone()[0],table)
+                self.assertEqual(backup.execute('SELECT id FROM tasks WHERE id=?',(task['id'],)).fetchone()[0],task['id'])
+        finally:
+            backup.close()
+
+    def test_online_backup_refuses_existing_destination_unchanged(self):
+        destination=self.root/'already-there.sqlite3';destination.write_bytes(b'keep me')
+        result=self.cli('backup',str(destination))
+        self.assertEqual(result.returncode,1)
+        self.assertIn('already exists',result.stderr)
+        self.assertEqual(destination.read_bytes(),b'keep me')
+
+    def test_online_backup_succeeds_with_another_read_connection_open(self):
+        destination=self.root/'concurrent.sqlite3'
+        with self.db.connect() as reader:
+            reader.execute('BEGIN')
+            reader.execute('SELECT * FROM projects').fetchall()
+            result=self.db.backup(destination)
+            self.assertTrue(destination.is_file())
+            self.assertEqual(reader.execute('SELECT COUNT(*) FROM projects').fetchone()[0],1)
+        backup=sqlite3.connect(destination)
+        try:
+            self.assertEqual(backup.execute('PRAGMA integrity_check').fetchone()[0],'ok')
+            with self.db.connect() as source:
+                self.assertEqual(backup.execute('PRAGMA user_version').fetchone()[0],source.execute('PRAGMA user_version').fetchone()[0])
+                tables=[r[0] for r in source.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")]
+                for table in tables:
+                    self.assertEqual(backup.execute('SELECT COUNT(*) FROM "'+table+'"').fetchone()[0],source.execute('SELECT COUNT(*) FROM "'+table+'"').fetchone()[0],table)
+        finally:
+            backup.close()
+
+    def test_backup_closes_source_when_destination_connection_open_fails(self):
+        source=sqlite3.connect(self.db.path)
+        destination=self.root/'failed-open.sqlite3'
+        with patch('orion.database.sqlite3.connect',side_effect=[source,sqlite3.OperationalError('destination connection failed')]) as connect:
+            with self.assertRaises(ValueError): self.db.backup(destination)
+        self.assertEqual(connect.call_count,2)
+        with self.assertRaises(sqlite3.ProgrammingError): source.execute('SELECT 1')
+        self.assertFalse(destination.exists())
+        self.assertFalse(destination.with_name(destination.name+'.partial').exists())
+
+    def test_backup_publish_failure_leaves_no_target_or_partial(self):
+        destination=self.root/'failed-publish.sqlite3'
+        with patch('orion.database.os.link',side_effect=OSError('publish failed')):
+            with self.assertRaises(ValidationError): self.db.backup(destination)
+        self.assertFalse(destination.exists())
+        self.assertFalse(destination.with_name(destination.name+'.partial').exists())
+
+    def test_backup_stale_partial_is_refused_and_preserved(self):
+        destination=self.root/'stale-partial.sqlite3'
+        partial=destination.with_name(destination.name+'.partial')
+        partial.write_bytes(b'preserve stale partial')
+        with patch('orion.database.sqlite3.connect') as connect:
+            with self.assertRaises(ValidationError): self.db.backup(destination)
+        connect.assert_not_called()
+        self.assertFalse(destination.exists())
+        self.assertEqual(partial.read_bytes(),b'preserve stale partial')
+
+    def test_backup_refusals_open_no_sqlite_connections(self):
+        existing=self.root/'exists.sqlite3';existing.write_bytes(b'already exists')
+        dangling=self.root/'dangling-link.sqlite3'
+        missing_parent=self.root/'missing'/'backup.sqlite3'
+        missing_source=Database(self.root/'missing-source.sqlite3')
+        with patch('orion.database.sqlite3.connect') as connect:
+            with self.assertRaises(ValidationError): self.db.backup(existing)
+            connect.assert_not_called()
+            with patch.object(Path,'is_symlink',autospec=True,side_effect=lambda value:value==dangling):
+                with self.assertRaises(ValidationError): self.db.backup(dangling)
+            connect.assert_not_called()
+            with self.assertRaises(ValidationError): self.db.backup(missing_parent)
+            connect.assert_not_called()
+            with self.assertRaises(ValidationError): missing_source.backup(missing_source.path)
+            connect.assert_not_called()
 
 
 if __name__ == "__main__":
